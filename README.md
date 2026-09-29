@@ -1,3 +1,5 @@
+![ELIOS Robotic Hand Simulation Banner](paper/img/github_banner.png)
+
 # ELIOS — 5-DOF Robotic Arm Simulation & HIL Toolkit
 
 A 3D kinematic simulator and hardware-in-the-loop (HIL) toolkit for **ELIOS**, a
