@@ -22,10 +22,17 @@ from .hardware_mapping import (
     apply_effective_limits, CAM_ASPECT, CAM_FOV_H, CAM_FOV_V, CAM_FOV_D,
 )
 from .serial_link import SerialLink, serial
-from .calibration_camera import camera_pose
+from .calibration_camera import camera_pose, SimCalibrationCamera
+from .tags_toolkit.sim_tags import add_tags
+from .tags_toolkit.tag_model import TAGS
+from .tags_toolkit.apriltag import AprilTagDetector, estimate_pose
 from .gcode import GCodeProgram, GCodeError, GCodeRunner, DEFAULT_GCODE, GCODE_HELP, GCODE_TICK_MS
-from .widgets import (StatusDot, AspectBox, FocusSplitter, ServoRow, make_card,
-                      group_label, add_soft_shadow, add_viewfinder, add_distance_guides)
+from .widgets import (StatusDot, AspectBox, FocusSplitter, ServoRow, ToggleSwitch, make_card,
+                      group_label, add_soft_shadow, add_viewfinder, add_distance_guides,
+                      add_tag_overlay)
+
+# Detection renders the offscreen sensor (~40 ms), so coalesce requests while moving.
+TAG_DETECT_INTERVAL_MS = 120
 from .dialogs import JointGraphWindow, CalibrationDialog
 
 
@@ -194,6 +201,36 @@ class HILToolkitGUI(QMainWindow):
 
     def build_camera_card(self):
         card, lay = make_card("Camera View", f"H{CAM_FOV_H:g}° V{CAM_FOV_V:g}° D{CAM_FOV_D:g}°")
+        switches = QHBoxLayout()
+        switches.setSpacing(14)
+        # Short labels: the card is ~290 px wide on compact screens.
+        self.dist_switch = ToggleSwitch("Distance", checked=True)
+        self.dist_switch.setEnabled(False)   # until a camera calibration is loaded
+        self.dist_switch.setToolTip("Distance guides — needs a camera calibration (Camera Calibration button).")
+        self.dist_switch.toggled.connect(self.on_distance_toggled)
+        self.tag_switch = ToggleSwitch("AprilTags")
+        self.tag_switch.setToolTip("AprilTag detection on the simulated camera image "
+                                   "(same sensor as the calibration camera).")
+        self.tag_switch.toggled.connect(self.on_tags_toggled)
+        for s in (self.dist_switch, self.tag_switch):
+            s.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.tag_status = QLabel("")
+        self.tag_status.setObjectName("Muted")
+        self.tag_status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.tag_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # never widens the card
+        switches.addWidget(self.dist_switch)
+        switches.addWidget(self.tag_switch)
+        switches.addWidget(self.tag_status, 1)
+        lay.addLayout(switches)
+
+        self.tag_cam = None          # offscreen sensor, created when detection is first enabled
+        self.tag_actors = []
+        self._tag_angles = None      # pose the current overlay was detected at
+        self.tag_timer = QTimer(self)
+        self.tag_timer.setSingleShot(True)
+        self.tag_timer.setInterval(TAG_DETECT_INTERVAL_MS)
+        self.tag_timer.timeout.connect(self.detect_tags)
+
         self.cam_plotter = QtInteractor(card)
         self.cam_plotter.set_background(C["surface_low"])
         # Aspect must match the lens so the horizontal FoV comes out at 81°
@@ -688,12 +725,66 @@ class HILToolkitGUI(QMainWindow):
         self.cam_plotter.camera.focal_point = focal
         self.cam_plotter.camera.up = up
         self.cam_plotter.interactor.Render()
+        if self.tag_switch.isChecked() and not self.tag_timer.isActive():
+            self.tag_timer.start()
+
+    # ── Camera View overlays ─────────────────────────────────────────────────
+    def on_distance_toggled(self, on):
+        for act in self.guide_actors:
+            act.SetVisibility(on)
+        self.cam_plotter.interactor.Render()
+
+    def on_tags_toggled(self, on):
+        if on:
+            if self.tag_cam is None:
+                self.tag_cam = SimCalibrationCamera()
+                self.tag_detector = AprilTagDetector()
+                self.tag_sizes = {tid: tag.size for tid, tag in TAGS.items()}   # mm
+            self.detect_tags()
+        else:
+            self.tag_timer.stop()
+            self.clear_tag_overlay()
+            self.tag_status.setText("")
+            self.cam_plotter.interactor.Render()
+
+    def clear_tag_overlay(self):
+        for act in self.tag_actors:
+            self.cam_plotter.renderer.RemoveActor2D(act)
+        self.tag_actors = []
+        self._tag_angles = None
+
+    def detect_tags(self):
+        """Run apriltag.py on the simulated sensor at the current pose and draw the
+        result over the Camera View (same pose, FoV and aspect as the sensor)."""
+        if not self.tag_switch.isChecked():
+            return
+        angles = np.array(ase.current_angles, dtype=float)
+        if self._tag_angles is not None and np.array_equal(angles, self._tag_angles):
+            return
+        cam = self.tag_cam
+        cam.set_pose(angles, pose_meshes=False)   # the GUI already posed the shared meshes
+        K = cam.camera_matrix()
+        dets = estimate_pose(self.tag_detector.detect(cam.capture_bgr()), K, np.zeros(5), self.tag_sizes)
+        self.clear_tag_overlay()
+        self.tag_actors = add_tag_overlay(self.cam_plotter, dets, K, cam.size, self.tag_sizes)
+        self._tag_angles = angles
+        text = " · ".join(
+            f"id{d.tag_id} {np.linalg.norm(d.tvec):.0f} mm" if d.tvec is not None else f"id{d.tag_id}"
+            for d in sorted(dets, key=lambda d: d.tag_id)) or "no tags in view"
+        self.tag_status.setText(text)
+        self.tag_status.setToolTip(f"Detected (distance from the lens): {text}")
+        self.cam_plotter.interactor.Render()
 
     def preview_calibration_pose(self, angles):
         """Show a calibration sample in both views, with the Camera View turned by
         that sample's θ1 — what the calibration camera saw. Display only:
         ase.current_angles (the streamed pose) is untouched."""
         ase.update_scene(angles)
+        # Detections belong to the streamed pose, not this sample; refresh_views()
+        # re-runs them once the preview is over.
+        self.tag_timer.stop()
+        if self.tag_actors:
+            self.clear_tag_overlay()
         pos, focal, up = camera_pose(angles[0])
         self.cam_plotter.camera.position = pos
         self.cam_plotter.camera.focal_point = focal
@@ -721,6 +812,7 @@ class HILToolkitGUI(QMainWindow):
         for p in (self.plotter, self.cam_plotter):
             for arm_name, cfg in ase.ARM_CONFIG.items():
                 p.add_mesh(ase.loaded_meshes[arm_name], color=cfg["color"], opacity=1.0, **shading)
+            add_tags(p)
             if p is self.plotter:  # the camera must not render its own housing
                 p.add_mesh(ase.cam_mesh, color="#A0A0A0", **shading)
             p.add_mesh(ase.chain_poly, color=C["on_surface_variant"], line_width=2.5, opacity=0.45)
@@ -759,6 +851,10 @@ class HILToolkitGUI(QMainWindow):
             self.cam_plotter.renderer.RemoveActor2D(act)
         self.camera_model = model
         self.guide_actors = add_distance_guides(self.cam_plotter, model)
+        for act in self.guide_actors:
+            act.SetVisibility(self.dist_switch.isChecked())
+        self.dist_switch.setEnabled(True)
+        self.dist_switch.setToolTip("Distance guides — floor lines from the camera calibration.")
         self.cam_plotter.interactor.Render()
 
     def setup_ee_workspace_projections(self):
@@ -814,6 +910,9 @@ class HILToolkitGUI(QMainWindow):
     def closeEvent(self, event):
         self.sync_timer.stop()
         self.gcode_timer.stop()
+        self.tag_timer.stop()
+        if self.tag_cam is not None:
+            self.tag_cam.close()
         self.link.close()
         for p in (self.plotter, self.cam_plotter, self.ee_plotter):
             p.close()

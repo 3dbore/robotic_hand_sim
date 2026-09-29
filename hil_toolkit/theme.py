@@ -153,6 +153,8 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
+QWidget#Switch {{ font-family: {FONT_LABEL}; font-size: 12px; font-weight: 700; }}
+
 QCheckBox {{ font-family: {FONT_LABEL}; color: {C['outline']}; font-size: 11px; font-weight: 700; spacing: 4px; }}
 QCheckBox:checked {{ color: {C['warning']}; }}
 QCheckBox::indicator {{
@@ -194,6 +196,7 @@ QLabel#RowName {{ font-size: 12px; }}
 QLabel#Metric {{ font-size: 16px; }}
 QLabel#MetricSmall {{ font-size: 12px; }}
 QLabel#Mono {{ font-size: 10px; }}
+QWidget#Switch {{ font-size: 11px; }}
 QFrame#Pill {{ border-radius: 13px; }}
 QTextEdit {{ padding: 6px; font-size: 10px; }}
 QPushButton {{ min-height: 24px; padding: 0 10px; font-size: 11px; }}

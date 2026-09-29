@@ -42,6 +42,10 @@ hil_toolkit/             HIL application package
   widgets.py                Reusable Qt/VTK widgets
   theme.py                 Design tokens & Qt stylesheets
   paths.py                 Filesystem locations
+  tags_toolkit/            AprilTags on the arm
+    apriltag.py              Detection + pose (standalone webcam test tool)
+    tag_model.py             Mounted tags: link, home pose, size -> ground-truth pose
+    sim_tags.py              Textured tags in the simulated views/camera
 arms/                     STL geometry for each arm segment, camera, FOV cone
 slave_code/               Arduino firmware (5-axis and 6-axis variants)
 calibration/              Camera model + sample correspondence data

@@ -12,6 +12,7 @@ from calibration import CorrespondenceSet, detect_color_blob
 
 from .sim_loader import ase
 from .theme import C
+from .tags_toolkit.sim_tags import add_tags
 from .hardware_mapping import (
     CAM_LENS_POS, CAM_VIEW_DIR, CAM_UP_DIR, CAM_FOV_V,
     CALIB_IMAGE_W, CALIB_IMAGE_H,
@@ -40,8 +41,9 @@ def grip_marker_base(angles):
 
 class SimCalibrationCamera:
     """Offscreen twin of the Camera View at a fixed sensor resolution. Renders only
-    physical geometry (arm + floor) and the gripper LED — no joint markers,
-    kinematic chain or viewfinder overlay, since a real camera would not see them."""
+    physical geometry (arm + floor), the gripper LED and the AprilTags — no joint
+    markers, kinematic chain or viewfinder overlay, since a real camera would not
+    see them."""
 
     def __init__(self, width=CALIB_IMAGE_W, height=CALIB_IMAGE_H):
         self.size = (width, height)
@@ -58,15 +60,17 @@ class SimCalibrationCamera:
         self._marker_home = self.marker.points.copy()
         # Unlit, so the LED renders as one flat colour like a saturated emitter
         p.add_mesh(self.marker, color=[v / 255 for v in GRIP_MARKER_RGB], lighting=False)
+        add_tags(p)
         self.plotter = p
 
     def set_pose(self, angles, pose_meshes=True):
-        """Pose this camera and (if pose_meshes) the shared scene meshes. Does not
-        touch ase.current_angles, so nothing is streamed to the hardware."""
+        """Pose this camera, its LED and (if pose_meshes) the shared scene meshes —
+        pass False when the scene is already at `angles`. Does not touch
+        ase.current_angles, so nothing is streamed to the hardware."""
         if pose_meshes:
             ase.update_scene(angles)
-            M5 = ase.link_transforms(angles)[5]
-            self.marker.points[:] = ase.apply_transform_to_points(self._marker_home, M5)
+        M5 = ase.link_transforms(angles)[5]
+        self.marker.points[:] = ase.apply_transform_to_points(self._marker_home, M5)
         pos, focal, up = camera_pose(angles[0])
         cam = self.plotter.camera
         cam.position, cam.focal_point, cam.up = pos, focal, up
@@ -87,6 +91,29 @@ class SimCalibrationCamera:
     def capture(self):
         self.plotter.render()
         return self.plotter.screenshot(return_img=True)
+
+    def capture_bgr(self):
+        """capture() in OpenCV's channel order, for tags_toolkit.apriltag."""
+        return np.ascontiguousarray(self.capture()[..., ::-1])
+
+    def camera_matrix(self):
+        """OpenCV intrinsics of this render: square pixels, principal point at the
+        image centre (pixel-centre convention, as in project()), no distortion."""
+        W, H = self.size
+        f = (H / 2.0) / np.tan(np.radians(CAM_FOV_V) / 2.0)
+        return np.array([[f, 0.0, W / 2.0 - 0.5],
+                         [0.0, f, H / 2.0 - 0.5],
+                         [0.0, 0.0, 1.0]])
+
+    def extrinsics(self):
+        """(R, t) base frame -> OpenCV camera frame (x right, y down, z forward), mm."""
+        cam = self.plotter.camera
+        pos, focal, up = (np.asarray(v, dtype=float) for v in (cam.position, cam.focal_point, cam.up))
+        z = (focal - pos) / np.linalg.norm(focal - pos)
+        y = -(up - np.dot(up, z) * z)
+        y /= np.linalg.norm(y)
+        R = np.vstack([np.cross(y, z), y, z])
+        return R, -R @ pos
 
     def close(self):
         self.plotter.close()

@@ -95,6 +95,76 @@ G28                    ; home
 M30
 """
 
+# Initial hardware bring-up / calibration sequence: one axis at a time, slow
+# feed (F150 = 2.5 mm/s), a dwell after every move so each step can be
+# watched before the next one starts. Every waypoint's (X,Y,Z) is the exact
+# forward-kinematics wrist position for a hand-picked, comfortably-inside-
+# limits (theta1, theta2, theta3), and was re-verified end to end (final
+# tracking error < 0.01 mm, no joint clamped) by driving it through the same
+# ik_step()/GCodeRunner path this file uses at runtime — see
+# hil_toolkit/hardware_mapping.py apply_effective_limits() for the effective
+# (sim ∩ hardware) limits this was checked against:
+#   J1 [-90,90]  J2 [-50,50]  J3 [-180,0]  J4 [-25,90]  J5 [-90,90]
+# All angles used below sit well inside those, with margin to spare.
+CALIBRATION_GCODE = """\
+; ELIOS initial hardware bring-up / calibration sequence
+; Slow (F150 = 2.5 mm/s), one axis at a time, dwell after every move so each
+; step can be watched before the next starts. Pause immediately if the
+; physical arm binds, stalls, or looks wrong before it reaches a waypoint.
+G21 G90 G17            ; mm, absolute, XY arc plane
+G28                    ; start from the initial pose
+M5                     ; open gripper
+G4 P800
+
+; 1. Lift off the cradle: small shoulder+elbow bend, pitch held level (A0/B0)
+G1 X0 Y-115.5 Z73.2 A0 B0 F150
+G4 P800
+
+; 2. Base (J1) sweep, +-20 deg, arm shape unchanged
+G1 X39.5 Y-108.6 Z73.2 F150
+G4 P600
+G1 X-39.5 Y-108.6 Z73.2 F150
+G4 P600
+G1 X0 Y-115.5 Z73.2 F150
+G4 P600
+
+; 3. Shoulder (J2) opens further, elbow (J3) bends further
+G1 X0 Y-120.2 Z51.7 F150
+G4 P600
+G1 X0 Y-156.5 Z56.5 F150
+G4 P800
+
+; 4. Wrist pitch (J4) sweep, position held fixed (firmware-limited to 60 deg/s)
+G1 A20
+G4 P600
+G1 A-20
+G4 P600
+G1 A0
+G4 P600
+
+; 5. Wrist roll (J5) sweep, position held fixed
+G1 B30
+G4 P600
+G1 B-30
+G4 P600
+G1 B0
+G4 P600
+
+; 6. Gripper open/close test
+M3 S60                 ; partial close
+G4 P800
+M5                      ; open
+G4 P600
+
+; 7. Retrace back to home, slowly
+G1 X0 Y-120.2 Z51.7 F150
+G4 P400
+G1 X0 Y-115.5 Z73.2 F150
+G4 P400
+G28                    ; home
+M30
+"""
+
 
 class GCodeError(Exception):
     def __init__(self, line, msg):

@@ -1,9 +1,10 @@
 """Small reusable Qt/VTK widgets shared by the main window and dialogs."""
+import cv2
 import numpy as np
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
                              QCheckBox, QSizePolicy, QSplitter, QSplitterHandle,
-                             QGraphicsDropShadowEffect)
-from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF
+                             QGraphicsDropShadowEffect, QAbstractButton)
+from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, QSize
 from PyQt5.QtGui import QPainter, QColor, QPen
 import pyvista as pv
 from vtkmodules.vtkRenderingCore import vtkActor2D, vtkCoordinate, vtkPolyDataMapper2D, vtkTextActor
@@ -63,6 +64,52 @@ class StatusDot(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(c)
         p.drawEllipse(center, 3.0, 3.0)
+        p.end()
+
+
+class ToggleSwitch(QAbstractButton):
+    """On/off switch with its label; the label is part of the click target.
+    Eco Green track when on, as for the other active states in DESIGN.md."""
+    def __init__(self, text, checked=False):
+        super().__init__()
+        self.setObjectName("Switch")
+        self.setText(text)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def _track_size(self):
+        h = 14 if theme.COMPACT else 16
+        return 1.8 * h, h
+
+    def sizeHint(self):
+        self.ensurePolished()
+        tw, th = self._track_size()
+        fm = self.fontMetrics()
+        return QSize(int(tw) + 8 + fm.horizontalAdvance(self.text()) + 2, max(int(th), fm.height()) + 4)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        tw, th = self._track_size()
+        track = QRectF(1, (self.height() - th) / 2, tw, th)
+        on, enabled = self.isChecked(), self.isEnabled()
+        track_color = C["surface_high"] if not enabled else C["primary"] if on else C["outline_variant"]
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(track_color))
+        p.drawRoundedRect(track, th / 2, th / 2)
+        if self.hasFocus():
+            p.setPen(QPen(QColor(C["primary"]), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(track.adjusted(-1, -1, 1, 1), th / 2 + 1, th / 2 + 1)
+        d = th - 4
+        x = track.right() - d - 2 if on else track.left() + 2
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(C["surface_lowest"]))
+        p.drawEllipse(QRectF(x, track.top() + 2, d, d))
+        p.setPen(QColor(C["on_surface_variant"] if enabled else C["outline_variant"]))
+        p.drawText(QRectF(tw + 8, 0, self.width() - tw - 8, self.height()),
+                   Qt.AlignVCenter | Qt.AlignLeft, self.text())
         p.end()
 
 
@@ -236,6 +283,53 @@ def add_distance_guides(plotter, model):
                 prop.SetJustificationToRight()
                 label.SetPosition(end[0] - 0.01, end[1])
             actors.append(label)
+    for act in actors:
+        plotter.renderer.AddActor2D(act)
+    return actors
+
+
+# X/Y/Z in cv2.drawFrameAxes' colours, so the overlay reads like apriltag.py.
+TAG_AXIS_COLORS = ("#ff0000", "#00ff00", "#0000ff")
+
+
+def add_tag_overlay(plotter, detections, camera_matrix, image_size, axis_length):
+    """tags_toolkit.apriltag's drawing — outline, centre, id and X/Y/Z axes — as
+    2D actors over a view whose viewport shows the same image as image_size
+    (the camera the detections were made in). axis_length: one length or
+    {tag_id: length}, in the unit of the detections' tvec. Returns the actors."""
+    W, H = image_size
+    aspect = W / H
+
+    def nv(uv):
+        return ((uv[0] + 0.5) / W, 1.0 - (uv[1] + 0.5) / H)
+
+    actors = []
+    for det in detections:
+        c = [nv(p) for p in det.corners]
+        actors.append(_normalized_line_actor([(c[i], c[(i + 1) % 4]) for i in range(4)],
+                                             C["primary_container"], 2.0))
+        cx, cy = nv(det.center)
+        ring = [(cx + 0.006 * np.cos(t), cy + 0.006 * aspect * np.sin(t))
+                for t in np.linspace(0, 2 * np.pi, 13)]
+        actors.append(_normalized_line_actor(list(zip(ring[:-1], ring[1:])), C["error"], 2.0))
+
+        label = vtkTextActor()
+        label.SetInput(f"id={det.tag_id}")
+        prop = label.GetTextProperty()
+        prop.SetColor(QColor(C["primary_container"]).getRgbF()[:3])
+        prop.SetFontSize(12)
+        prop.SetBold(True)
+        label.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        label.SetPosition(c[0][0], c[0][1] + 0.02)
+        actors.append(label)
+
+        if det.rvec is not None:
+            L = axis_length.get(det.tag_id) if isinstance(axis_length, dict) else axis_length
+            ends, _ = cv2.projectPoints(np.float64([[0, 0, 0], [L, 0, 0], [0, L, 0], [0, 0, L]]),
+                                        det.rvec, det.tvec, camera_matrix, None)
+            o, *axes = [nv(p) for p in ends.reshape(-1, 2)]
+            for end, color in zip(axes, TAG_AXIS_COLORS):
+                actors.append(_normalized_line_actor([(o, end)], color, 2.5))
     for act in actors:
         plotter.renderer.AddActor2D(act)
     return actors
