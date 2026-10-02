@@ -64,6 +64,10 @@ class AprilTagDetector:
         self.family = family
         self._dictionary = cv2.aruco.getPredefinedDictionary(TAG_FAMILIES[family])
         self._params = cv2.aruco.DetectorParameters()
+        # Sub-pixel corners: unrefined ones sit ~0.6 px inside the black square
+        # (measured on the simulated camera: mean error 0.75 -> 0.20 px), which
+        # shrinks the tag and biases PnP distance and calibrated focal length.
+        self._params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
         self._detector = cv2.aruco.ArucoDetector(self._dictionary, self._params)
 
     def detect(self, frame_bgr):

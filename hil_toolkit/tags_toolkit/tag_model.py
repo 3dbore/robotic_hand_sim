@@ -5,6 +5,7 @@ Each tag is defined once at the home pose (all joints 0°) in the base frame
 and rides rigidly on one link, so its pose for any joint angles is
     link_transforms(angles)[link] @ home_pose.
 That is the ground truth a camera's AprilTag pose estimate is compared with.
+CALIB_TAG is the tag the camera calibration uses: tag 0, already on the hand.
 
 Tag frame = apriltag.py's object model: X right and Y up as the detector reads
 the tag, Z out of the printed face. Corners come out in the detector's order
@@ -73,3 +74,26 @@ TAGS = {
                   R=frame_from_normal(z=[0, np.cos(_DOWN_3), -np.sin(_DOWN_3)], y_hint=[0, 0, 1]),
                   print_size=10.0, image=f"{TAG_IMAGE_DIR}/tag36h11_id01_armb.png"),
 }
+
+# ── Camera-calibration target: the tag already on the hand ──────────────────
+# Tag 0 on arm5's bottom face rides on the last two axes (J4 pitch, J5 roll).
+# It faces the floor at the home pose, so gcode.CALIBRATION_GCODE pitches the
+# wrist up (A +20..+40°) to turn it toward the lens; roll (B) tilts it
+# sideways, moving the corners out of the arm's plane. Pose estimation and the
+# ground truth use the black square: 30 mm print -> 18.52 mm black square.
+CALIB_TAG = TAGS[0]
+CALIB_TAG_FAMILY = "tag36h11"
+CALIB_TAG_SIZE = CALIB_TAG.size            # black-square side, mm (≈18.52)
+CALIB_TAG_PRINT = CALIB_TAG.print_size     # printed image side, mm (30)
+
+
+def calib_tag_spec():
+    """The calibration target as plain data, for the ground-truth file."""
+    t = CALIB_TAG
+    return {"family": CALIB_TAG_FAMILY, "id": t.tag_id, "image": t.image.rsplit("/", 1)[-1],
+            "black_square_mm": round(CALIB_TAG_SIZE, 3), "print_size_mm": CALIB_TAG_PRINT,
+            "link": "arm5 bottom face (hand, after J4 pitch and J5 roll)",
+            "home_center_base_mm": t.center.tolist(),
+            "home_R_base": t.R.tolist(),
+            "home_corners_base_mm": t.corners(np.zeros(5)).tolist(),
+            "corner_order": "TL, TR, BR, BL as the detector reads the tag"}

@@ -24,12 +24,14 @@ from .hardware_mapping import (
 from .serial_link import SerialLink, serial
 from .calibration_camera import camera_pose, SimCalibrationCamera
 from .tags_toolkit.sim_tags import add_tags
-from .tags_toolkit.tag_model import TAGS
+from .tags_toolkit.tag_model import TAGS, CALIB_TAG
 from .tags_toolkit.apriltag import AprilTagDetector, estimate_pose
-from .gcode import GCodeProgram, GCodeError, GCodeRunner, DEFAULT_GCODE, GCODE_HELP, GCODE_TICK_MS
+from .gcode import (GCodeProgram, GCodeError, GCodeRunner, DEFAULT_GCODE, CALIBRATION_GCODE,
+                    GCODE_HELP, GCODE_TICK_MS)
+from .tag_calibration import TagCalibrationSession, format_result
 from .widgets import (StatusDot, AspectBox, FocusSplitter, ServoRow, ToggleSwitch, make_card,
                       group_label, add_soft_shadow, add_viewfinder, add_distance_guides,
-                      add_tag_overlay)
+                      add_tag_overlay, add_hud_text)
 
 # Detection renders the offscreen sensor (~40 ms), so coalesce requests while moving.
 TAG_DETECT_INTERVAL_MS = 120
@@ -114,6 +116,10 @@ class HILToolkitGUI(QMainWindow):
         self.gcode_runner = None
         self._gcode_shown_line = None
         self.gcode_time_elapsed = 0.0
+        # AprilTag camera calibration run (CalibrationDialog -> start_tag_calibration)
+        self.tag_calib = None
+        self.calib_hud = None
+        self._gcode_before_calib = None
 
         # Telemetry + serial streaming
         self.sync_timer = QTimer()
@@ -601,6 +607,8 @@ class HILToolkitGUI(QMainWindow):
         if self.gcode_timer.isActive():
             return
         if self.gcode_runner is None:
+            if self.tag_calib is None:   # a new program clears a finished calibration's read-out
+                self.clear_calibration_display()
             _, _, ee = ase.forward_kinematics(ase.current_angles)
             try:
                 program = GCodeProgram(self.gcode_text.toPlainText(), ee,
@@ -634,6 +642,11 @@ class HILToolkitGUI(QMainWindow):
     def reset_gcode(self):
         self.gcode_timer.stop()
         self.finish_gcode()
+        if self.tag_calib is not None:
+            self.tag_calib = None
+            self.restore_gcode_text()
+            self.log_message("Calibration: aborted — nothing saved.", "warn")
+        self.clear_calibration_display()
         self.gcode_time_elapsed = 0.0
         self.graph_window.reset_plot()
         self.log_message("G-code: reset.")
@@ -673,6 +686,8 @@ class HILToolkitGUI(QMainWindow):
             elif kind == "grip":
                 self.grip_slider.setValue(payload)
                 self.log_message(f"G-code: gripper → {payload:03d}°")
+            elif kind == "capture":
+                self.on_gcode_capture(payload)
             elif kind == "pause":
                 self.gcode_timer.stop()
                 self.gcode_status.setText(f"Paused · L{payload}")
@@ -681,6 +696,8 @@ class HILToolkitGUI(QMainWindow):
                 self.gcode_timer.stop()
                 self.finish_gcode("Done")
                 self.log_message(f"G-code: completed in {self.gcode_time_elapsed:.1f} s.", "ok")
+                if self.tag_calib is not None:
+                    self.finish_tag_calibration()
                 return
 
         line = runner.line or line
@@ -689,6 +706,91 @@ class HILToolkitGUI(QMainWindow):
                 self.highlight_gcode_line(line, C["primary_fixed"])
                 self._gcode_shown_line = line
             self.gcode_status.setText(f"Running · L{line}")
+
+    # ── AprilTag camera calibration ──────────────────────────────────────────
+    def start_tag_calibration(self):
+        """Run CALIBRATION_GCODE through the normal G-code path (so it streams to
+        the arm like any program); every M240 captures the hand's tag (id 0). Returns False if it could not start."""
+        if self.gcode_runner is not None:
+            self.log_message("Calibration: reset the current G-code program first.", "warn")
+            return False
+        self._gcode_before_calib = self.gcode_text.toPlainText()
+        self.gcode_text.setPlainText(CALIBRATION_GCODE)
+        _, _, ee = ase.forward_kinematics(ase.current_angles)
+        n = GCodeProgram(CALIBRATION_GCODE, ee, ase.desired_global_pitch,
+                         ase.desired_global_roll).n_captures
+        self.clear_calibration_display()
+        self.ensure_tag_cam()
+        self.tag_calib = TagCalibrationSession(self.tag_cam, self.tag_detector, CALIBRATION_GCODE, n)
+        self.calib_hud = add_hud_text(self.cam_plotter)
+        self.update_calib_hud()
+        self.tag_switch.setChecked(True)     # live tag overlay while it runs
+        self.log_message(f"Calibration: tag36h11 id {CALIB_TAG.tag_id}, black square "
+                         f"{CALIB_TAG.size:.2f} mm on the hand · {n} captures (M240).", "ok")
+        self.run_gcode()
+        if self.gcode_runner is None:        # did not compile
+            self.tag_calib = None
+            self.restore_gcode_text()
+            self.clear_calibration_display()
+            return False
+        return True
+
+    def on_gcode_capture(self, line):
+        session = self.tag_calib
+        if session is None:
+            self.log_message(f"G-code: M240 at line {line} — no calibration running, frame not kept.")
+            return
+        c = session.capture(ase.current_angles, line, self.gcode_time_elapsed, self.gripper_cmd)
+        self._tag_angles = None              # the session moved the shared sensor
+        if c["detected"]:
+            pnp = c.get("pnp")
+            self.log_message(f"Calibration: capture {c['index']}/{session.n_expected} · L{line} · "
+                             f"{c['distance_mm']:.1f} mm" +
+                             (f" (PnP {pnp['distance_mm']:.1f})" if pnp else "") +
+                             f" · corner err ≤ {max(c['corner_err_px']):.2f} px")
+        else:
+            self.log_message(f"Calibration: capture {c['index']}/{session.n_expected} · L{line} · "
+                             "tag not detected", "warn")
+        self.update_calib_hud()
+
+    def finish_tag_calibration(self):
+        session, self.tag_calib = self.tag_calib, None
+        self.restore_gcode_text()
+        try:
+            result = session.finish()
+        except ValueError as e:
+            self.log_message(f"Calibration failed: {e}", "err")
+            self.calib_dialog.show_tag_result(f"Calibration failed: {e}")
+            return
+        self.set_camera_model(result["model"])
+        self.update_calib_hud(session)       # read-out stays until the next program / Reset
+        self.log_message(f"Calibration solved: {result['summary']['points']} corners, reprojection RMS "
+                         f"{result['diag']['reproj_rms']:.3f} px → "
+                         f"{os.path.basename(result['paths']['ground_truth'])}", "ok")
+        self.calib_dialog.show_tag_result(format_result(result))
+
+    def update_calib_hud(self, session=None):
+        session = session or self.tag_calib
+        if self.calib_hud is not None and session is not None:
+            lines = session.hud_lines()
+            # Fit the right 40% of the view (the arm keeps to the left); Courier ≈ 0.6 em wide
+            w, h = self.cam_plotter.interactor.width(), self.cam_plotter.interactor.height()
+            fs = min(0.40 * w / (0.6 * max(map(len, lines))), 0.94 * h / (1.15 * len(lines)))
+            self.calib_hud.GetTextProperty().SetFontSize(int(np.clip(fs, 6, 14)))
+            self.calib_hud.SetInput("\n".join(lines))
+            self.cam_plotter.interactor.Render()
+
+    def clear_calibration_display(self):
+        """Remove the calibration read-out (after a finished or aborted run)."""
+        if self.calib_hud is not None:
+            self.cam_plotter.renderer.RemoveActor2D(self.calib_hud)
+            self.calib_hud = None
+            self.cam_plotter.interactor.Render()
+
+    def restore_gcode_text(self):
+        if self._gcode_before_calib is not None:
+            self.gcode_text.setPlainText(self._gcode_before_calib)
+            self._gcode_before_calib = None
 
     # ── Manual override ──────────────────────────────────────────────────────
     def refresh_views(self):
@@ -734,12 +836,15 @@ class HILToolkitGUI(QMainWindow):
             act.SetVisibility(on)
         self.cam_plotter.interactor.Render()
 
+    def ensure_tag_cam(self):
+        if self.tag_cam is None:
+            self.tag_cam = SimCalibrationCamera()
+            self.tag_detector = AprilTagDetector()
+            self.tag_sizes = {tid: tag.size for tid, tag in TAGS.items()}   # mm
+
     def on_tags_toggled(self, on):
         if on:
-            if self.tag_cam is None:
-                self.tag_cam = SimCalibrationCamera()
-                self.tag_detector = AprilTagDetector()
-                self.tag_sizes = {tid: tag.size for tid, tag in TAGS.items()}   # mm
+            self.ensure_tag_cam()
             self.detect_tags()
         else:
             self.tag_timer.stop()

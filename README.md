@@ -22,7 +22,9 @@ with a simulated-camera calibration pipeline to match.
 - **Camera calibration** (`calibration.py`) — closed-form intrinsic/extrinsic
   camera calibration (Spong, Hutchinson & Vidyasagar, *Robot Modeling and
   Control*, Appendix E), camera-agnostic — consumes correspondences from
-  either the simulated camera view or a real camera.
+  either the simulated camera view or a real camera. The startup procedure
+  runs a real-arm-safe G-code that shows the hand's AprilTag to the camera and saves
+  a ground-truth file to check the real run against.
 - **G-code interpreter** (`hil_toolkit/gcode.py`) — drives the wrist through
   linear/arc moves and gripper commands, in sim and on hardware.
 
@@ -38,6 +40,7 @@ hil_toolkit/             HIL application package
   sim_loader.py            Loads arm-sim-end.py as a library (headless)
   hardware_mapping.py      Sim -> servo mapping, effective joint limits
   calibration_camera.py    Simulated-camera correspondence generator
+  tag_calibration.py       Startup calibration: gripper AprilTag + G-code -> ground truth
   serial_link.py           pyserial line-protocol wrapper
   gcode.py                 G-code interpreter + timed runner
   dialogs.py               Joint-graph and calibration dialogs
@@ -50,7 +53,7 @@ hil_toolkit/             HIL application package
     sim_tags.py              Textured tags in the simulated views/camera
 arms/                     STL geometry for each arm segment, camera, FOV cone
 slave_code/               Arduino firmware (5-axis and 6-axis variants)
-calibration/              Camera model + sample correspondence data
+calibration/              Camera model, correspondences, AprilTag ground truth (generated)
 docs/                      Kinematics, calibration, and design reference docs
 paper/                    Typst write-up
 arm-sim-mapping-calculation.ipynb   Kinematics derivation notebook

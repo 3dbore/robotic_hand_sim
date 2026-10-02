@@ -34,7 +34,7 @@ _GCODE_LINE = re.compile(r"(?:[A-Z][-+]?(?:\d+\.?\d*|\.\d+))+")
 GCODE_HELP = (
     "G0/G1 X Y Z A(pitch°) B(roll°) F(mm/min) · G2/G3 arc with I J K · "
     "G17/G18/G19 plane · G90/G91 · G4 P(ms)/S(s) · G28 home · "
-    "M3 [S°] grip · M5 release · M0 pause · M30 end")
+    "M3 [S°] grip · M5 release · M240 camera capture · M0 pause · M30 end")
 
 # Demo program: verified reachable within the hardware limits, joint speeds <= 60°/s
 DEFAULT_GCODE = """\
@@ -95,73 +95,94 @@ G28                    ; home
 M30
 """
 
-# Initial hardware bring-up / calibration sequence: one axis at a time, slow
-# feed (F150 = 2.5 mm/s), a dwell after every move so each step can be
-# watched before the next one starts. Every waypoint's (X,Y,Z) is the exact
-# forward-kinematics wrist position for a hand-picked, comfortably-inside-
-# limits (theta1, theta2, theta3), and was re-verified end to end (final
-# tracking error < 0.01 mm, no joint clamped) by driving it through the same
-# ik_step()/GCodeRunner path this file uses at runtime — see
-# hil_toolkit/hardware_mapping.py apply_effective_limits() for the effective
-# (sim ∩ hardware) limits this was checked against:
-#   J1 [-90,90]  J2 [-50,50]  J3 [-180,0]  J4 [-25,90]  J5 [-90,90]
-# All angles used below sit well inside those, with margin to spare.
+# Startup camera calibration with the AprilTag already on the hand
+# (tags_toolkit.tag_model.CALIB_TAG = tag 0, arm5 bottom face, 30 mm print,
+# 18.52 mm black square). The tag faces the floor at the initial pose, so the
+# wrist pitches up (A +20/+40°) to turn it toward the lens, and roll (B 0/30/60)
+# tilts it sideways for out-of-plane corners. 16 M240 (camera capture)
+# stations at four depths (wrist Y -100/-120/-140/-160, tag 100–169 mm from
+# the lens, seen 51–75° off its face normal) and heights Z90–150. J1 stays
+# at 0: the camera rides on arm1.
+#
+# Written to run on the real arm as-is, and checked by driving it through
+# GCodeRunner/ik_step() at the 50 ms tick (hil_toolkit/hardware_mapping.py
+# effective limits J1 [-90,90] J2 [-50,50] J3 [-180,0] J4 [-25,90] J5 [-90,90]):
+#   - no rapids (G0/G28): every move is G1 at <= F600 (10 mm/s)
+#   - feeds chosen so no joint exceeds 20°/s (servo limit 60°/s): roll is
+#     never commanded on its own, it always rides a translation
+#   - peak joint speeds J2 4°/s, J3 5°/s, J4 13°/s, J5 20°/s; no IK warnings
+#   - joints stay clear of their stops: J2 ±16° (35° margin), J3 0..-56°
+#     (0 = the initial pose itself), J4 0..+75° (15°), J5 0..+60° (30°)
+#   - the hand stays >= 29 mm above the floor
+#   - G4 P400 settle before each capture; ~64 s in total
+#   - the tag is detected at every station (sub-pixel corners, error < 0.9 px)
 CALIBRATION_GCODE = """\
-; ELIOS initial hardware bring-up / calibration sequence
-; Slow (F150 = 2.5 mm/s), one axis at a time, dwell after every move so each
-; step can be watched before the next starts. Pause immediately if the
-; physical arm binds, stalls, or looks wrong before it reaches a waypoint.
+; ELIOS startup camera calibration · AprilTag on the hand
+; Target: tag36h11 id 0 on the hand's bottom face (moves with J4 pitch and
+; J5 roll), print 30 mm, black square 18.52 mm. The wrist pitches up (A) to
+; show it to the camera. M240 = capture a camera frame here.
 G21 G90 G17            ; mm, absolute, XY arc plane
-G28                    ; start from the initial pose
-M5                     ; open gripper
-G4 P800
+G1 X0 Y-42.5 Z90 A0 B0 F600   ; initial pose, level wrist, no roll
 
-; 1. Lift off the cradle: small shoulder+elbow bend, pitch held level (A0/B0)
-G1 X0 Y-115.5 Z73.2 A0 B0 F150
-G4 P800
-
-; 2. Base (J1) sweep, +-20 deg, arm shape unchanged
-G1 X39.5 Y-108.6 Z73.2 F150
-G4 P600
-G1 X-39.5 Y-108.6 Z73.2 F150
-G4 P600
-G1 X0 Y-115.5 Z73.2 F150
-G4 P600
-
-; 3. Shoulder (J2) opens further, elbow (J3) bends further
-G1 X0 Y-120.2 Z51.7 F150
-G4 P600
-G1 X0 Y-156.5 Z56.5 F150
-G4 P800
-
-; 4. Wrist pitch (J4) sweep, position held fixed (firmware-limited to 60 deg/s)
-G1 A20
-G4 P600
-G1 A-20
-G4 P600
-G1 A0
-G4 P600
-
-; 5. Wrist roll (J5) sweep, position held fixed
-G1 B30
-G4 P600
-G1 B-30
-G4 P600
-G1 B0
-G4 P600
-
-; 6. Gripper open/close test
-M3 S60                 ; partial close
-G4 P800
-M5                      ; open
-G4 P600
-
-; 7. Retrace back to home, slowly
-G1 X0 Y-120.2 Z51.7 F150
+; Depth 1 · wrist Y-100, tag ~100-117 mm from the lens
+G1 Y-100 Z110 A20 F600 ; out and up, pitching the tag toward the camera
 G4 P400
-G1 X0 Y-115.5 Z73.2 F150
+M240
+G1 Z130 B30
 G4 P400
-G28                    ; home
+M240
+G1 Z150 B0
+G4 P400
+M240
+G1 Z110 A40 B60
+G4 P400
+M240
+
+; Depth 2 · wrist Y-120, tag ~120-134 mm
+G1 Y-120 Z90 B30
+G4 P400
+M240
+G1 Z110 B0
+G4 P400
+M240
+G1 Z130 A20
+G4 P400
+M240
+G1 Z150
+G4 P400
+M240
+G1 Z130 B60 F400       ; roll rides the move, <= 20 deg/s
+G4 P400
+M240
+
+; Depth 3 · wrist Y-140, tag ~141-151 mm
+G1 Y-140 Z150 B30 F600
+G4 P400
+M240
+G1 Z130 B0
+G4 P400
+M240
+G1 Z110 B30
+G4 P400
+M240
+G1 Z90 A40 B0
+G4 P400
+M240
+
+; Depth 4 · wrist Y-160, tag ~158-169 mm
+G1 Y-160 B30
+G4 P400
+M240
+G1 Z130 A20 B0
+G4 P400
+M240
+G1 Z150 B30
+G4 P400
+M240
+
+; Return: level the wrist on the way back, then the initial pose
+G1 Y-100 Z110 A0 B0
+G1 Y-42.5 Z90
 M30
 """
 
@@ -185,6 +206,10 @@ class GCodeProgram:
     @property
     def duration(self):
         return sum(s.get("duration", 0.0) for s in self.segments)
+
+    @property
+    def n_captures(self):
+        return sum(s["kind"] == "capture" for s in self.segments)
 
     def _compile(self, text, pos, a, b):
         mode, plane, relative, feed = None, 17, False, GCODE_FEED_DEFAULT
@@ -278,6 +303,8 @@ class GCodeProgram:
                         np.clip(v, GRIPPER.servo_min, GRIPPER.servo_max)))})
                 elif m == 5:
                     self.segments.append({"kind": "grip", "line": n, "value": GRIPPER.servo_min})
+                elif m == 240:   # Marlin's "trigger camera": grab a frame at this pose
+                    self.segments.append({"kind": "capture", "line": n})
                 else:
                     raise GCodeError(n, f"unsupported M{m}")
 
@@ -353,7 +380,7 @@ class GCodeRunner:
 
     def tick(self, dt):
         """Advance by dt seconds. Returns events: ("warn", msg), ("grip", value),
-        ("pause", line), ("end", line)."""
+        ("capture", line), ("pause", line), ("end", line)."""
         seg = self.segment
         if seg is None:
             return [("end", None)]
@@ -388,6 +415,9 @@ class GCodeRunner:
             self._next()
         elif kind == "pause":
             events.append(("pause", seg["line"]))
+            self._next()
+        elif kind == "capture":
+            events.append(("capture", seg["line"]))
             self._next()
         elif kind == "end":
             events.append(("end", seg["line"]))

@@ -13,6 +13,7 @@ from .theme import C
 from .paths import CALIB_DIR, CAMERA_MODEL_FILE
 from .hardware_mapping import JOINT_NAMES, JOINT_COLORS, CALIB_IMAGE_W, CALIB_IMAGE_H
 from .calibration_camera import collect_correspondences, format_calib_stats
+from .tags_toolkit.tag_model import CALIB_TAG, CALIB_TAG_FAMILY, CALIB_TAG_SIZE, CALIB_TAG_PRINT
 from .widgets import make_card, group_label
 
 
@@ -61,8 +62,19 @@ class JointGraphWindow(QDialog):
             line.setData([], [])
 
 
+TAG_INFO = (f"Target: {CALIB_TAG_FAMILY} id {CALIB_TAG.tag_id}, the tag on the hand's bottom face "
+            f"(last two axes). Print {CALIB_TAG_PRINT:.0f} mm, black square {CALIB_TAG_SIZE:.2f} mm. "
+            "The wrist pitches up to show it to the camera. "
+            "Runs the calibration G-code (slow, ≤ 20°/s per joint, streamed to the arm if streaming) "
+            "and captures the tag at every M240.")
+LED_INFO = ("Poses are sampled at random over the effective joint limits (sim only — the jumps "
+            "between poses are not a real-arm motion); the gripper LED is the tracked marker.")
+
+
 class CalibrationDialog(QDialog):
-    """Stage 1: collect (x, y, z) ↔ (r, c) correspondences from the simulated camera."""
+    """Stage 1: collect (x, y, z) ↔ (r, c) correspondences from the simulated camera —
+    the AprilTag calibration G-code (default, runnable on the real arm) or random
+    LED poses."""
 
     def __init__(self, gui):
         super().__init__(gui)
@@ -78,10 +90,12 @@ class CalibrationDialog(QDialog):
 
         form = QGridLayout()
         form.setSpacing(6)
-        form.addWidget(group_label("Pixel source"), 0, 0)
+        form.addWidget(group_label("Method"), 0, 0)
         self.source = QComboBox()
-        self.source.addItem("Idealized — renderer projection", "ideal")
-        self.source.addItem("Realistic — blob detection on render", "detected")
+        self.source.addItem("AprilTag on the hand — calibration G-code", "apriltag")
+        self.source.addItem("LED, random poses — renderer projection", "ideal")
+        self.source.addItem("LED, random poses — blob detection on render", "detected")
+        self.source.currentIndexChanged.connect(self.on_method_changed)
         form.addWidget(self.source, 0, 1)
         form.addWidget(group_label("Points"), 1, 0)
         self.n_points = QSpinBox()
@@ -98,8 +112,7 @@ class CalibrationDialog(QDialog):
         self.btn_run.setObjectName("Primary")
         self.btn_run.clicked.connect(self.run)
         lay.addWidget(self.btn_run)
-        self.status = QLabel("Poses are sampled over the effective joint limits; "
-                             "the gripper LED is the tracked marker.")
+        self.status = QLabel()
         self.status.setWordWrap(True)
         self.status.setObjectName("Secondary")
         lay.addWidget(self.status)
@@ -107,12 +120,42 @@ class CalibrationDialog(QDialog):
         self.result.setReadOnly(True)
         lay.addWidget(self.result, 1)
         self.last_set = None
+        self.on_method_changed()
+
+    def on_method_changed(self):
+        tag = self.source.currentData() == "apriltag"
+        self.n_points.setEnabled(not tag)
+        self.seed.setEnabled(not tag)
+        self.btn_run.setText("Run Calibration G-code" if tag else "Collect")
+        self.status.setText(TAG_INFO if tag else LED_INFO)
+
+    def show_tag_result(self, text):
+        """Called by the main window when the calibration G-code has finished."""
+        self.source.setCurrentIndex(self.source.findData("apriltag"))
+        self.result.setPlainText(text)
+        self.status.setText("Done — camera model and ground truth saved; distance guides updated.")
+        self.show()
+        self.raise_()
+
+    def run_apriltag(self):
+        if self.gui.gcode_runner is not None:
+            self.status.setText("Reset the G-code program in the main window first.")
+            return
+        self.result.setPlainText("Running the calibration G-code in the main window — "
+                                 "this dialog reopens with the result when it ends.")
+        self.hide()   # modal: the main window must stay usable to watch / pause the run
+        if not self.gui.start_tag_calibration():
+            self.show()
+            self.status.setText("Could not start — see the System Log.")
 
     def run(self):
+        source = self.source.currentData()
+        if source == "apriltag":
+            self.run_apriltag()
+            return
         if self.gui.streaming or self.gui.gcode_timer.isActive():
             self.status.setText("Pause streaming and G-code first.")
             return
-        source = self.source.currentData()
         n = self.n_points.value()
         self.btn_run.setEnabled(False)
 

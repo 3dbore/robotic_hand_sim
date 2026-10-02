@@ -232,6 +232,28 @@ def _normalized_line_actor(segs, color, width):
     return actor
 
 
+def add_hud_text(plotter):
+    """Read-out panel over the right 40% of the view (the arm only ever shows in
+    the left of the Camera View). Set its text with actor.SetInput() and fit
+    it to the view with GetTextProperty().SetFontSize(); remove it with
+    plotter.renderer.RemoveActor2D(actor)."""
+    hud = vtkTextActor()
+    prop = hud.GetTextProperty()
+    prop.SetFontFamilyToCourier()
+    prop.SetFontSize(10 if theme.COMPACT else 12)
+    prop.SetBold(True)
+    prop.SetColor(QColor(C["on_surface"]).getRgbF()[:3])
+    prop.SetBackgroundColor(QColor(C["surface_lowest"]).getRgbF()[:3])
+    prop.SetBackgroundOpacity(0.85)
+    prop.SetJustificationToLeft()
+    prop.SetVerticalJustificationToTop()
+    prop.SetLineSpacing(1.15)
+    hud.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+    hud.SetPosition(0.6, 0.97)
+    plotter.renderer.AddActor2D(hud)
+    return hud
+
+
 def add_distance_guides(plotter, model):
     """Rear-view camera guides drawn from a calibrated CameraModel only: floor
     lines at fixed ground distances ahead of the lens, joined by side rails.

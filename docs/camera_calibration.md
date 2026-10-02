@@ -157,3 +157,62 @@ c   = -f_y * x^c_2 / x^c_3 + o_c
   - This linear method does not model lens distortion; for a real robotics camera, consider following this closed-form solve with a nonlinear refinement (e.g. Levenberg-Marquardt on reprojection error, optionally with radial/tangential distortion terms) if accuracy requirements are tight.
   - Points should not be coplanar (a planar point set makes `A` rank-deficient / the calibration ill-posed) — use points spread through a 3D volume.
   - Need enough points/well-conditioned geometry: 8 equations are the theoretical minimum for the 8 unknowns in `A x = 0`, but many more (and well-spread, non-degenerate points) are needed for a robust/noise-tolerant solution.
+## 13. Startup procedure in this repo — the AprilTag on the hand
+
+**Camera Calibration → "AprilTag on the hand — calibration G-code"** runs the procedure below in the HIL toolkit. It is the same procedure the real arm runs.
+
+**Target** (`hil_toolkit/tags_toolkit/tag_model.py`, `CALIB_TAG = TAGS[0]`): the tag that is already on the hand. Nothing extra is mounted.
+
+| | |
+|---|---|
+| Family / id | `tag36h11`, id 0 (`paper/apriltags/tag36h11_id00_base_endeffector.png`) |
+| Mount | arm5 bottom face, so it moves with the last two axes (J4 pitch, J5 roll). Faces the floor at the initial pose; centre (0, −97, 80.5) mm, base frame |
+| Printed image side | 30.0 mm |
+| Black square (the size that matters) | **18.52 mm** (the PNG's black square is 410/664 of its side) |
+
+Measure the printed black square with calipers. If it differs from 18.52 mm, change `print_size` of tag 0 in `TAGS` to match.
+
+**Motion** (`hil_toolkit/gcode.py`, `CALIBRATION_GCODE`):
+
+- 16 stations at four depths: wrist Y −100/−120/−140/−160, putting the tag 100–169 mm from the lens.
+- Heights Z90–150.
+- Wrist pitch A +20/+40° turns the downward-facing tag toward the camera. The camera sees it 51–75° off its face normal.
+- Roll B 0/30/60° tilts the tag sideways, which moves the corners out of the arm's plane.
+- J1 stays at 0°, because the camera rides on arm1.
+- At each station the program waits `G4 P400` to settle, then sends `M240` (camera capture).
+
+The program was checked in the runner:
+
+- G1 moves only (no G0/G28 rapids), at most F600, which is 10 mm/s.
+- Roll always moves together with a translation, so no joint exceeds 20°/s. The servo limit is 60°/s.
+- Every joint stays at least 14° inside its effective limit. J3 starts at its 0° stop, which is the initial pose itself.
+- The hand stays at least 29 mm above the floor.
+- The run takes about 64 s.
+
+**Correspondences:** each capture gives the 4 black-square corners. Their 3D positions come from forward kinematics plus the tag's mounting on arm5, in the arm1 frame. Their 2D positions are the detector's sub-pixel corners. 16 captures give 64 points.
+
+**Simulated result** (exact camera known):
+
+- Corner detection error: 0.24 px mean.
+- Reprojection RMS: 0.20 px.
+- f_x is 1.9 px (0.25 %) below the true value.
+- Optical centre is within 0.19 mm, and R within 0.03°.
+
+**Saved to `calibration/`:**
+
+- `apriltag_groundtruth_<stamp>.json`, plus `apriltag_groundtruth.json` as a copy of the latest run. This is the ground truth for the real run. It contains:
+  - the tag spec;
+  - the true and solved camera models;
+  - the G-code text and its SHA-1;
+  - for every capture: G-code line, joint angles, servo commands, tag pose (base and camera frames), corner positions, ideal and detected pixels, and the PnP distance with its error.
+- `correspondences_apriltag_<stamp>.csv`: the solver input.
+- `camera_model.json`: the solved model, which also drives the distance guides.
+
+**On the real arm:**
+
+1. Run the same G-code.
+2. Grab a frame at each `M240` and detect tag id 0.
+3. Compare the frames with the ground-truth file capture by capture, matched on `gcode_line`.
+4. Feed the measured corners into `calibration.calibrate()`.
+
+The tag is seen at a steep angle, so check on the real camera that it is detected at every station. If a station is missed, raise A there by up to 10°, as long as J4 stays below its 90° stop.
