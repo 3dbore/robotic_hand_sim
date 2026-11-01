@@ -102,6 +102,8 @@ values. The sim-to-servo mapping is derived from `Kinematics.xlsx` — see
 - [`docs/calculation.md`](docs/calculation.md) /
   [`docs/calculation_indonesia.md`](docs/calculation_indonesia.md) — full
   kinematics derivation (EN/ID).
+- [`docs/calibration_sequence.md`](docs/calibration_sequence.md) — the sim → real
+  AprilTag calibration workflow (read this first if you are an AI agent).
 - [`docs/camera_calibration.md`](docs/camera_calibration.md) — the closed-form
   calibration method implemented in `calibration.py`.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — visual design system for the ELIO
