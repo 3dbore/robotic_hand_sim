@@ -87,6 +87,8 @@ Two uses — pick deliberately:
 Caveat for use 2: any real backlash/offset is not removed — it is absorbed into the solved camera model
 (biased `T`, `R`, `f`). Trust the result only if use 1 shows small residuals. If residuals are large, fix or
 characterise the mechanical error first (e.g. fit joint offsets) rather than calibrating through it.
+The toolkit's *Axis Offsets* window corrects the servo zero by hand. Those offsets shift the hardware only, so
+the sim ground truth stays valid; set them before a real run.
 
 ## 4. Conventions that bite
 

@@ -1,6 +1,7 @@
 """The main application window: layout, live telemetry, G-code and hardware link."""
 import datetime
 import os
+import time
 
 import numpy as np
 import pyvista as pv
@@ -19,9 +20,10 @@ from .paths import CAMERA_MODEL_FILE
 from .sim_loader import ase
 from .hardware_mapping import (
     SERVO_CHANNELS, GRIPPER, SERIAL_BAUD, BOARD_RESET_MS, STREAM_INTERVAL_MS,
-    apply_effective_limits, CAM_ASPECT, CAM_FOV_H, CAM_FOV_V, CAM_FOV_D,
+    apply_effective_limits, load_axis_offsets, format_cmd,
+    CAM_ASPECT, CAM_FOV_H, CAM_FOV_V, CAM_FOV_D,
 )
-from .serial_link import SerialLink, serial
+from .serial_link import SerialLink, serial, parse_stat_line, parse_boot_line, STAT_COUNTERS
 from .calibration_camera import camera_pose, SimCalibrationCamera
 from .tags_toolkit.sim_tags import add_tags
 from .tags_toolkit.tag_model import TAGS, CALIB_TAG
@@ -35,7 +37,13 @@ from .widgets import (StatusDot, AspectBox, FocusSplitter, ServoRow, ToggleSwitc
 
 # Detection renders the offscreen sensor (~40 ms), so coalesce requests while moving.
 TAG_DETECT_INTERVAL_MS = 120
-from .dialogs import JointGraphWindow, CalibrationDialog
+# An unchanged command is re-sent this often, so a frame the firmware dropped recovers.
+HEARTBEAT_S = 0.5
+# 6-axis-esp32 reports once a second; silence after this long means other firmware.
+STAT_MISSING_WARN_S = 3.0
+# Reset reasons that point at a fault rather than someone opening the port.
+FAULT_RESETS = {"BROWNOUT", "PANIC", "INT_WDT", "TASK_WDT", "WDT"}
+from .dialogs import JointGraphWindow, CalibrationDialog, AxisOffsetDialog
 
 
 class HILToolkitGUI(QMainWindow):
@@ -51,7 +59,12 @@ class HILToolkitGUI(QMainWindow):
         self.streaming = False
         self.last_sent = None
         self.frames_sent = 0
+        self.last_sent_at = 0.0
         self.gripper_cmd = GRIPPER.home
+        self.fw_stat = None         # latest parsed STAT line from the firmware
+        self.fw_boot_reason = None
+        self.stream_started_at = 0.0
+        self.stat_missing_warned = False
 
         root = QWidget()
         root.setObjectName("Page")
@@ -101,9 +114,10 @@ class HILToolkitGUI(QMainWindow):
         self.calib_dialog = CalibrationDialog(self)
 
         self.log_message("System initialized.", "ok")
-        for w in apply_effective_limits():
+        for w in load_axis_offsets() + apply_effective_limits():
             self.log_message(w, "warn")
         self.log_effective_limits()
+        self.offset_dialog = AxisOffsetDialog(self)   # reads the offsets just loaded
         if serial is None:
             self.log_message("pyserial not installed — run: pip install pyserial", "err")
 
@@ -167,6 +181,10 @@ class HILToolkitGUI(QMainWindow):
         btn_graphs = QPushButton("Joint Graphs")
         btn_graphs.clicked.connect(lambda: self.graph_window.show())
         header.addWidget(btn_graphs)
+        btn_offsets = QPushButton("Axis Offsets")
+        btn_offsets.setToolTip("Jog each axis and save the correction to the initial pose")
+        btn_offsets.clicked.connect(self.show_offset_dialog)
+        header.addWidget(btn_offsets)
         btn_calib = QPushButton("Camera Calibration")
         btn_calib.clicked.connect(lambda: self.calib_dialog.show())
         header.addWidget(btn_calib)
@@ -468,6 +486,9 @@ class HILToolkitGUI(QMainWindow):
             self.log_message(f"Could not open {device}: {e}", "err")
             return
         self.board_ready = False
+        self.fw_stat = None
+        self.fw_boot_reason = None
+        self.stat_missing_warned = False
         self.log_message(f"Opened {device} @ {SERIAL_BAUD}. Waiting for board reset…")
         QTimer.singleShot(BOARD_RESET_MS, self.on_board_ready)
         self.update_link_ui()
@@ -515,13 +536,14 @@ class HILToolkitGUI(QMainWindow):
             self.disconnect_link(f"Serial write failed: {e}")
             return False
         self.last_sent = line
+        self.last_sent_at = time.monotonic()
         self.frames_sent += 1
         self.tx_label.setText(line)
         self.frames_label.setText(str(self.frames_sent))
         return True
 
     def home_line(self):
-        return ",".join(str(ch.home) for ch in SERVO_CHANNELS)
+        return ",".join(format_cmd(ch.command(ch.effective_home)) for ch in SERVO_CHANNELS)
 
     def set_streaming(self, on):
         if on and not (self.link.is_open() and self.board_ready):
@@ -529,6 +551,7 @@ class HILToolkitGUI(QMainWindow):
             return
         self.streaming = on
         if on:
+            self.stream_started_at = time.monotonic()
             # First frame attaches each servo instantly at the given angle, so
             # attach at the known initial pose; later frames are speed-limited.
             if self.send_line(self.home_line()):
@@ -545,7 +568,9 @@ class HILToolkitGUI(QMainWindow):
         if self.btn_stream.isChecked():
             self.btn_stream.setChecked(False)
         if self.link.is_open():
-            if self.send_line("," * (len(SERVO_CHANNELS) - 1)):
+            # Nothing repeats this frame once streaming is off, so don't bet on one copy.
+            line = "," * (len(SERVO_CHANNELS) - 1)
+            if self.send_line(line) and self.send_line(line):
                 self.log_message("All servos released (no PWM).", "warn")
 
     def on_invert_toggled(self, ch, checked):
@@ -557,9 +582,27 @@ class HILToolkitGUI(QMainWindow):
         ase.update_scene(ase.current_angles)
         self.refresh_views()
 
+    def show_offset_dialog(self):
+        self.offset_dialog.show()
+        self.offset_dialog.raise_()
+
+    def on_offsets_changed(self):
+        """An offset moved: the hardware follows on the next sync tick. The sim only
+        moves if the pulse limit now excludes its current pose."""
+        before = np.array(ase.current_angles, dtype=float)
+        for w in apply_effective_limits():
+            self.log_message(w, "warn")
+        if not np.array_equal(before, ase.current_angles):
+            ase.update_scene(ase.current_angles)
+            self.refresh_views()
+
     def set_gripper(self, value):
         self.gripper_cmd = int(value)
         self.grip_value.setText(f"{self.gripper_cmd:03d}°")
+
+    def gripper_output(self):
+        """The gripper isn't in the sim, so its offset is applied to the slider value."""
+        return GRIPPER.command(self.gripper_cmd + GRIPPER.offset)
 
     # ── Periodic sync: telemetry + streaming + RX ────────────────────────────
     def compute_commands(self):
@@ -567,7 +610,7 @@ class HILToolkitGUI(QMainWindow):
         angles = ase.current_angles
         for ch in SERVO_CHANNELS:
             if ch.sim_joint is None:
-                cmds.append(self.gripper_cmd)
+                cmds.append(self.gripper_output())
                 statuses.append("ok")
                 continue
             sim_deg = float(angles[ch.sim_joint])
@@ -592,15 +635,62 @@ class HILToolkitGUI(QMainWindow):
 
         if self.link.is_open():
             try:
-                for line in self.link.read_lines():
-                    self.log_message(f"RX  {line}", "rx")
+                lines = self.link.read_lines()
             except Exception as e:
                 self.disconnect_link(f"Serial read failed: {e}")
                 return
+            for line in lines:
+                self.handle_rx_line(line)
             if self.streaming:
-                line = ",".join(str(c) for c in cmds)
-                if line != self.last_sent:
+                now = time.monotonic()
+                line = ",".join(format_cmd(c) for c in cmds)
+                if line != self.last_sent or now - self.last_sent_at >= HEARTBEAT_S:
                     self.send_line(line)
+                if (self.fw_stat is None and not self.stat_missing_warned
+                        and now - self.stream_started_at >= STAT_MISSING_WARN_S):
+                    self.stat_missing_warned = True
+                    self.log_message("No STAT reports from the board. Flash the current "
+                                     "6-axis-esp32 firmware: older firmware ignores half-degree "
+                                     "commands and has no link checks.", "warn")
+
+    def handle_rx_line(self, line):
+        stat = parse_stat_line(line)
+        if stat is not None:
+            self.on_firmware_stat(stat)
+            return
+        reason = parse_boot_line(line)
+        if reason is not None:
+            self.on_firmware_boot(reason)
+            return
+        self.log_message(f"RX  {line}", "rx")
+
+    def on_firmware_stat(self, stat):
+        prev = self.fw_stat
+        if prev is not None and stat["rx"] < prev["rx"]:
+            self.on_firmware_boot(None)   # counters restarted but the BOOT line was lost
+            prev = None
+        self.fw_stat = stat
+        rises = [f"{k} +{stat[k] - (prev[k] if prev else 0)}" for k in STAT_COUNTERS
+                 if k != "rx" and stat[k] > (prev[k] if prev else 0)]
+        if rises:
+            self.log_message(f"Firmware: {', '.join(rises)} "
+                             f"(bad=dropped frame, i2c=bus error, fix=PCA register repaired, "
+                             f"reinit=PCA restarted).", "warn")
+
+    def on_firmware_boot(self, reason):
+        self.fw_boot_reason = reason or "unknown"
+        self.fw_stat = None
+        if self.streaming:
+            # The reboot left every servo released. Re-attaching here could brown out
+            # the same supply again and loop, so that decision goes back to the user.
+            self.btn_stream.setChecked(False)
+            self.log_message(f"Board rebooted while streaming (reason: {self.fw_boot_reason}). "
+                             "Streaming stopped and servos are released. A brownout means the "
+                             "supply sagged: check the servo power before re-enabling.", "err")
+        elif reason in FAULT_RESETS:
+            self.log_message(f"Board reset cause: {reason}. Check the supply and wiring.", "warn")
+        else:
+            self.log_message(f"Board booted (reason: {self.fw_boot_reason}).", "rx")
 
     # ── G-code ───────────────────────────────────────────────────────────────
     def run_gcode(self):
@@ -740,7 +830,7 @@ class HILToolkitGUI(QMainWindow):
         if session is None:
             self.log_message(f"G-code: M240 at line {line} — no calibration running, frame not kept.")
             return
-        c = session.capture(ase.current_angles, line, self.gcode_time_elapsed, self.gripper_cmd)
+        c = session.capture(ase.current_angles, line, self.gcode_time_elapsed, self.gripper_output())
         self._tag_angles = None              # the session moved the shared sensor
         if c["detected"]:
             pnp = c.get("pnp")

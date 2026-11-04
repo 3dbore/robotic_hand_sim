@@ -82,18 +82,39 @@ python arm-sim-end.py
 python arm-hil-toolkit.py
 ```
 
-Flash the matching firmware from `slave_code/` (`6-axis/6-axis.ino` by
-default) to an Arduino Uno first. The serial protocol is a single line of six
-comma-separated integer degrees:
+Flash the matching firmware from `slave_code/` first: `6-axis-esp32/6-axis-esp32.ino`
+(ESP32 + PCA9685), or `6-axis/6-axis.ino` (Arduino Uno, which also needs
+`COMMAND_RESOLUTION_DEG = 1.0` in `hil_toolkit/hardware_mapping.py`). The serial
+protocol is a single line of six comma-separated values plus a checksum:
 
 ```
-D2,D3,D4,D5,D6,D8\n
+F0,F1,F2,F3,F4,F5,CC\n
 ```
 
 mapping to Gripper, Wrist Yaw, Wrist Pitch, Arm B, Arm A, and Base
-respectively. An empty field detaches that servo; every frame carries all six
-values. The sim-to-servo mapping is derived from `Kinematics.xlsx` — see
-`hil_toolkit/hardware_mapping.py`.
+respectively, in degrees with at most one decimal. 0–180 is the standard
+500–2500 µs; the ESP32 firmware accepts −36–216 (100–2900 µs) so an axis offset
+can carry a range past that, while the Uno firmware only takes whole degrees
+0–180. An empty field releases that servo; every frame carries all six values.
+`CC` is the CRC-8 (polynomial 0x07) of everything before the last comma, as two
+hex digits. The ESP32 firmware drops any frame that fails it; the Uno firmware
+ignores it. The sim-to-servo
+mapping is derived from `Kinematics.xlsx` — see `hil_toolkit/hardware_mapping.py`.
+
+The ESP32 firmware reports back with `BOOT reason=...` at startup and, once a
+second, `STAT rx=.. bad=.. i2c=.. fix=.. reinit=.. out=...`. The toolkit logs
+any rise in those counters and stops streaming if the board reboots.
+
+**Matching the real initial pose to the sim:** connect, enable *Stream to Arm*,
+then open *Axis Offsets*. Jog each axis by the amount you choose until the real
+arm matches the sim's initial pose, and press *Save*. Offsets are stored per
+machine in `calibration/axis_offsets.json` and loaded at startup.
+
+An offset has no limit and moves the axis's whole operating range with it: a joint
+that runs ±90° from a home of 90° runs ±90° from 95° after a +5° offset, so it sends
+5–185°. Commands still stop at the firmware's −36–216° pulse limit, and the window
+says when a range passes 0–180° or that limit. Past 0–180° only the servo's own stop
+limits it, so back off if it buzzes at the end of its travel.
 
 ## Documentation
 

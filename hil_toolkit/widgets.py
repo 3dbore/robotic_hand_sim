@@ -11,7 +11,8 @@ from vtkmodules.vtkRenderingCore import vtkActor2D, vtkCoordinate, vtkPolyDataMa
 
 from . import theme
 from .theme import C
-from .hardware_mapping import FLOOR_Z, GUIDE_BANDS, GUIDE_HALF_WIDTH
+from .hardware_mapping import (FLOOR_Z, GUIDE_BANDS, GUIDE_HALF_WIDTH,
+                               PULSE_LIMIT_MIN_DEG, PULSE_LIMIT_MAX_DEG)
 
 
 class StatusDot(QWidget):
@@ -358,7 +359,8 @@ def add_tag_overlay(plotter, detections, camera_matrix, image_size, axis_length)
 
 
 class RangeBar(QWidget):
-    """Servo travel 0..180 with the allowed band, home tick and current marker."""
+    """Everything the firmware can command, with the allowed band, home tick and
+    current marker. The margins either side of 0..180 are where offsets can reach."""
     def __init__(self):
         super().__init__()
         self.setFixedHeight(12)
@@ -382,7 +384,8 @@ class RangeBar(QWidget):
         cy = self.height() / 2.0
 
         def x(v):
-            return x0 + w * (max(0.0, min(180.0, v)) / 180.0)
+            span = PULSE_LIMIT_MAX_DEG - PULSE_LIMIT_MIN_DEG
+            return x0 + w * (max(0.0, min(span, v - PULSE_LIMIT_MIN_DEG)) / span)
 
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(C["surface_high"]))
@@ -475,16 +478,16 @@ class ServoRow(QWidget):
     def refresh(self, cmd, sim_deg, lim, status):
         color = {"ok": C["primary"], "near": C["warning"], "clip": C["error"]}[status]
         self.dot.set_state(color, glow=(status != "ok"))
-        self.value.setText(f"{cmd:03d}°")
+        self.value.setText(f"{cmd:05.1f}°")
         if self.ch.sim_joint is None:
             self.sim.setText("hardware only")
-            self.limits.setText(f"{self.ch.servo_min}…{self.ch.servo_max}° servo")
-            band = (self.ch.servo_min, self.ch.servo_max)
+            self.limits.setText(f"{self.ch.range_min:g}…{self.ch.range_max:g}° servo")
+            band = (self.ch.range_min, self.ch.range_max)
         else:
             self.sim.setText(f"sim {sim_deg:+6.1f}°")
             self.limits.setText(f"{lim[0]:+.0f}…{lim[1]:+.0f}° sim")
             band = (self.ch.raw_servo(lim[0]), self.ch.raw_servo(lim[1]))
-        self.bar.set_values(band[0], band[1], self.ch.home, cmd, color)
+        self.bar.set_values(band[0], band[1], self.ch.effective_home, cmd, color)
 
 
 def make_card(title, action=None):

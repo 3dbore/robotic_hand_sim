@@ -2,24 +2,52 @@
 HARDWARE MAPPING (Kinematics.xlsx)
 ------------------------------------
 Sim <-> servo mapping: the startup pose of the sim (all joints 0 deg) and of
-the hardware (servo "Initial Position") are identical, so each axis is
+the hardware (servo "Initial Position") should be identical, so each axis is
 mapped purely as a signed offset from its initial position:
-    servo = home + sign * ratio * sim_angle
+    servo = home + offset + sign * ratio * sim_angle
+`offset` is the per-machine correction measured in the Axis Offsets window; it
+shifts the hardware only, the sim's pose (and so the kinematics) is untouched.
 
 Also carries the fixed camera/marker geometry used by both live rendering
 and the calibration correspondence generator, and the effective (sim n
 hardware) joint limits.
 """
+import json
+import math
+import os
+
 import numpy as np
 
+from .paths import AXIS_OFFSETS_FILE, CALIB_DIR
 from .sim_loader import ase
 from .theme import C
+
+# Smallest servo step on the wire. 6-axis-esp32 accepts one decimal; set this to
+# 1.0 when driving the Uno firmware (6-axis.ino), which only accepts integers.
+COMMAND_RESOLUTION_DEG = 0.5
+
+# The furthest command the ESP32 firmware will turn into a pulse (100 and 2900 us at
+# 500-2500 us = 0-180°). Keep in step with ANGLE_LIMIT_MIN/MAX in 6-axis-esp32.ino.
+PULSE_LIMIT_MIN_DEG = -36
+PULSE_LIMIT_MAX_DEG = 216
+
+
+def quantize(deg):
+    return round(deg / COMMAND_RESOLUTION_DEG) * COMMAND_RESOLUTION_DEG
+
+
+def format_cmd(deg):
+    """Serial field text: "90" for whole degrees, "90.5" otherwise."""
+    return f"{deg:g}"
 
 
 class ServoChannel:
     """One serial field. Maps a sim joint angle (deg, relative to startup pose)
-    to an absolute servo command:  servo = home + sign * ratio * sim_angle.
+    to an absolute servo command:  servo = home + offset + sign * ratio * sim_angle.
 
+    servo_min, servo_max: operating range at zero offset, in servo degrees.
+    offset: servo degrees, corrects the real initial pose to match the sim's. It has
+            no limit of its own and shifts the whole operating range with it.
     sign  : +1 when increasing servo angle turns the joint the same way as the
             sim's positive (CCW) rotation. Flip with the INV toggle in the GUI
             if an axis moves the wrong way during bring-up.
@@ -31,27 +59,57 @@ class ServoChannel:
         self.pin = pin
         self.sim_joint = sim_joint
         self.home = home
+        self.offset = 0.0
         self.servo_min = servo_min
         self.servo_max = servo_max
         self.sign = sign
         self.ratio = ratio
         self.note = note
 
+    @property
+    def effective_home(self):
+        return self.home + self.offset
+
+    @property
+    def range_min(self):
+        return self.servo_min + self.offset
+
+    @property
+    def range_max(self):
+        return self.servo_max + self.offset
+
+    def past_pulse_limit(self):
+        return self.range_min < PULSE_LIMIT_MIN_DEG or self.range_max > PULSE_LIMIT_MAX_DEG
+
+    def set_offset(self, deg):
+        self.offset = float(quantize(deg))
+
+    def command(self, raw):
+        """A servo angle as it goes on the wire: clamped to the shifted range and the
+        pulse limit, then quantized."""
+        in_range = min(max(raw, self.range_min), self.range_max)
+        return quantize(min(max(in_range, PULSE_LIMIT_MIN_DEG), PULSE_LIMIT_MAX_DEG))
+
     def raw_servo(self, sim_deg):
-        return self.home + self.sign * self.ratio * sim_deg
+        return self.effective_home + self.sign * self.ratio * sim_deg
 
     def to_servo(self, sim_deg):
         """Returns (command, clipped)."""
         raw = self.raw_servo(sim_deg)
-        clamped = self.servo_min if raw < self.servo_min else self.servo_max if raw > self.servo_max else raw
-        cmd = int(round(clamped))
+        cmd = self.command(raw)
         return cmd, abs(raw - cmd) > 0.5
 
     def sim_range(self):
-        """Hardware-reachable range expressed in sim degrees."""
-        a = (self.servo_min - self.home) / (self.sign * self.ratio)
-        b = (self.servo_max - self.home) / (self.sign * self.ratio)
-        return min(a, b), max(a, b)
+        """Hardware-reachable range expressed in sim degrees. An offset leaves this
+        unchanged until the pulse limit cuts in. Sim 0° always stays inside, so an
+        offset never drags the sim off its initial pose."""
+        lo = max(self.range_min, PULSE_LIMIT_MIN_DEG)
+        hi = min(self.range_max, PULSE_LIMIT_MAX_DEG)
+        if lo > hi:
+            return 0.0, 0.0
+        a = (lo - self.effective_home) / (self.sign * self.ratio)
+        b = (hi - self.effective_home) / (self.sign * self.ratio)
+        return min(a, b, 0.0), max(a, b, 0.0)
 
 
 # Order == serial field order of 6-axis.ino
@@ -114,6 +172,39 @@ GUIDE_HALF_WIDTH = 60.0   # mm either side of the camera's ground track
 
 JOINT_NAMES = ["J1 Base", "J2 Arm A", "J3 Arm B", "J4 Pitch", "J5 Roll"]
 JOINT_COLORS = [C["primary"], C["tertiary_container"], C["warning"], "#c25700", C["error"]]
+
+
+def load_axis_offsets():
+    """Reads the saved offsets into SERVO_CHANNELS. A missing file means no offsets;
+    a bad one is reported and ignored, never fatal. Returns a list of warnings."""
+    try:
+        with open(AXIS_OFFSETS_FILE, encoding="utf-8") as f:
+            saved = json.load(f)["offsets_deg"]
+        items = [(ch, saved.get(ch.name, 0.0)) for ch in SERVO_CHANNELS]
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for _, v in items):
+            raise ValueError("non-numeric offset")
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        return [f"Ignoring {os.path.basename(AXIS_OFFSETS_FILE)}: {e}"]
+
+    warnings = []
+    for ch, value in items:
+        ch.set_offset(value)
+        if ch.past_pulse_limit():
+            warnings.append(f"{ch.name}: saved offset {ch.offset:+g}° puts its range past the "
+                            f"{PULSE_LIMIT_MIN_DEG}…{PULSE_LIMIT_MAX_DEG}° pulse limit; "
+                            "commands stop at the limit.")
+    return warnings
+
+
+def save_axis_offsets():
+    """Writes the current offsets; the replace keeps a crash from truncating the file."""
+    os.makedirs(CALIB_DIR, exist_ok=True)
+    tmp = AXIS_OFFSETS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"offsets_deg": {ch.name: ch.offset for ch in SERVO_CHANNELS}}, f, indent=2)
+    os.replace(tmp, AXIS_OFFSETS_FILE)
 
 
 def apply_effective_limits():
