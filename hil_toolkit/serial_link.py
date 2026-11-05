@@ -9,7 +9,7 @@ Thin line-oriented wrapper over pyserial for the slave firmware protocol:
 
   from the board (6-axis-esp32):
       "BOOT reason=BROWNOUT"
-      "STAT rx=120 bad=0 i2c=0 fix=0 reinit=0 out=10.0,90.0,90.0,180.0,90.0,-"
+      "STAT rx=120 bad=0 i2c=0 fix=0 reinit=0 spike=0 out=10.0,90.0,90.0,180.0,90.0,-"
 
 The CRC is added here, so the rest of the toolkit only deals in the six fields.
 6-axis.ino (Uno) stops reading after six fields and simply ignores it.
@@ -23,8 +23,10 @@ except ImportError:
     serial = None
     list_ports = None
 
-STAT_COUNTERS = ("rx", "bad", "i2c", "fix", "reinit")
-_STAT_RE = re.compile(r"^STAT " + " ".join(rf"{k}=(\d+)" for k in STAT_COUNTERS) + r" out=(\S+)$")
+STAT_COUNTERS = ("rx", "bad", "i2c", "fix", "reinit", "spike")
+# `spike` is optional so a board still running the previous firmware keeps reporting.
+_STAT_RE = re.compile(r"^STAT " + " ".join(rf"{k}=(\d+)" for k in STAT_COUNTERS[:-1])
+                      + r"(?: spike=(\d+))? out=(\S+)$")
 _BOOT_RE = re.compile(r"^BOOT reason=(\w+)$")
 
 
@@ -44,12 +46,12 @@ def frame_line(line):
 
 
 def parse_stat_line(line):
-    """Returns {"rx", "bad", "i2c", "fix", "reinit", "out"} or None if `line` isn't
+    """Returns {"rx", "bad", "i2c", "fix", "reinit", "spike", "out"} or None if `line` isn't
     a well-formed STAT line. `out` holds per-axis output degrees, None = no pulses."""
     m = _STAT_RE.match(line)
     if m is None:
         return None
-    stat = {k: int(v) for k, v in zip(STAT_COUNTERS, m.groups())}
+    stat = {k: int(v or 0) for k, v in zip(STAT_COUNTERS, m.groups())}
     try:
         stat["out"] = [None if f == "-" else float(f) for f in m.group(len(STAT_COUNTERS) + 1).split(",")]
     except ValueError:

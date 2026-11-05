@@ -20,7 +20,8 @@ from .paths import CAMERA_MODEL_FILE
 from .sim_loader import ase
 from .hardware_mapping import (
     SERVO_CHANNELS, GRIPPER, SERIAL_BAUD, BOARD_RESET_MS, STREAM_INTERVAL_MS,
-    apply_effective_limits, load_axis_offsets, format_cmd,
+    apply_effective_limits, load_axis_offsets, load_axis_directions, save_axis_directions,
+    format_cmd,
     CAM_ASPECT, CAM_FOV_H, CAM_FOV_V, CAM_FOV_D,
 )
 from .serial_link import SerialLink, serial, parse_stat_line, parse_boot_line, STAT_COUNTERS
@@ -65,6 +66,8 @@ class HILToolkitGUI(QMainWindow):
         self.fw_boot_reason = None
         self.stream_started_at = 0.0
         self.stat_missing_warned = False
+        # Before the UI: each ServoRow's INV checkbox reads ch.sign when it is built
+        direction_warnings = load_axis_directions()
 
         root = QWidget()
         root.setObjectName("Page")
@@ -114,7 +117,7 @@ class HILToolkitGUI(QMainWindow):
         self.calib_dialog = CalibrationDialog(self)
 
         self.log_message("System initialized.", "ok")
-        for w in load_axis_offsets() + apply_effective_limits():
+        for w in direction_warnings + load_axis_offsets() + apply_effective_limits():
             self.log_message(w, "warn")
         self.log_effective_limits()
         self.offset_dialog = AxisOffsetDialog(self)   # reads the offsets just loaded
@@ -578,6 +581,10 @@ class HILToolkitGUI(QMainWindow):
         for w in apply_effective_limits():
             self.log_message(w, "warn")
         self.log_message(f"{ch.name}: direction {'inverted' if checked else 'normal'}.", "warn")
+        try:
+            save_axis_directions()
+        except OSError as e:
+            self.log_message(f"Could not save axis directions: {e}", "err")
         self.log_effective_limits()
         ase.update_scene(ase.current_angles)
         self.refresh_views()
@@ -675,7 +682,7 @@ class HILToolkitGUI(QMainWindow):
         if rises:
             self.log_message(f"Firmware: {', '.join(rises)} "
                              f"(bad=dropped frame, i2c=bus error, fix=PCA register repaired, "
-                             f"reinit=PCA restarted).", "warn")
+                             f"reinit=PCA restarted, spike=glitched value ignored).", "warn")
 
     def on_firmware_boot(self, reason):
         self.fw_boot_reason = reason or "unknown"

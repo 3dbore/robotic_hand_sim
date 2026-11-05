@@ -18,7 +18,7 @@ import os
 
 import numpy as np
 
-from .paths import AXIS_OFFSETS_FILE, CALIB_DIR
+from .paths import AXIS_DIRECTIONS_FILE, AXIS_OFFSETS_FILE, CALIB_DIR
 from .sim_loader import ase
 from .theme import C
 
@@ -198,13 +198,42 @@ def load_axis_offsets():
     return warnings
 
 
-def save_axis_offsets():
-    """Writes the current offsets; the replace keeps a crash from truncating the file."""
+def _write_json(path, data):
+    """The replace keeps a crash from truncating the file."""
     os.makedirs(CALIB_DIR, exist_ok=True)
-    tmp = AXIS_OFFSETS_FILE + ".tmp"
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"offsets_deg": {ch.name: ch.offset for ch in SERVO_CHANNELS}}, f, indent=2)
-    os.replace(tmp, AXIS_OFFSETS_FILE)
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+def save_axis_offsets():
+    _write_json(AXIS_OFFSETS_FILE, {"offsets_deg": {ch.name: ch.offset for ch in SERVO_CHANNELS}})
+
+
+def load_axis_directions():
+    """Reads the saved INV choices into SERVO_CHANNELS. A missing file, or an axis the
+    file doesn't name, keeps the default sign; a bad file is reported and ignored, never
+    fatal. Returns a list of warnings."""
+    try:
+        with open(AXIS_DIRECTIONS_FILE, encoding="utf-8") as f:
+            saved = json.load(f)["signs"]
+        items = [(ch, saved.get(ch.name, ch.sign)) for ch in SERVO_CHANNELS if ch.sim_joint is not None]
+        if not all(v in (1, -1) for _, v in items):
+            raise ValueError("sign must be 1 or -1")
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        return [f"Ignoring {os.path.basename(AXIS_DIRECTIONS_FILE)}: {e}"]
+
+    for ch, sign in items:
+        ch.sign = sign
+    return []
+
+
+def save_axis_directions():
+    _write_json(AXIS_DIRECTIONS_FILE,
+                {"signs": {ch.name: ch.sign for ch in SERVO_CHANNELS if ch.sim_joint is not None}})
 
 
 def apply_effective_limits():

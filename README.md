@@ -102,13 +102,26 @@ ignores it. The sim-to-servo
 mapping is derived from `Kinematics.xlsx` — see `hil_toolkit/hardware_mapping.py`.
 
 The ESP32 firmware reports back with `BOOT reason=...` at startup and, once a
-second, `STAT rx=.. bad=.. i2c=.. fix=.. reinit=.. out=...`. The toolkit logs
+second, `STAT rx=.. bad=.. i2c=.. fix=.. reinit=.. spike=.. out=...`. The toolkit logs
 any rise in those counters and stops streaming if the board reboots.
+
+The ESP32 firmware also guards each axis against a value that is wrong but still
+passes the checksum (a `180` arriving as `18`). A target more than 20° from the last
+accepted one is held until a second frame agrees, so a one-frame glitch never reaches
+the servo and a real jump is taken one frame (50 ms at 20 Hz) later; `spike` counts
+the glitches thrown away. Accepted targets are then eased with an 80 ms low-pass before
+the 60°/s speed limit. The gate, match window and smoothing are constants at the top
+of the `.ino` (`SPIKE_GATE_DEG`, `SPIKE_CONFIRM_FRAMES`, `SMOOTHING_TAU_MS`); the gate
+has to stay larger than the biggest honest step between two frames.
 
 **Matching the real initial pose to the sim:** connect, enable *Stream to Arm*,
 then open *Axis Offsets*. Jog each axis by the amount you choose until the real
 arm matches the sim's initial pose, and press *Save*. Offsets are stored per
 machine in `calibration/axis_offsets.json` and loaded at startup.
+
+**Reversing an axis:** tick *INV* on its row in *Servo Telemetry*. The choice saves
+immediately to `calibration/axis_directions.json`, per machine, and is restored at
+startup. Delete that file to go back to the defaults.
 
 An offset has no limit and moves the axis's whole operating range with it: a joint
 that runs ±90° from a home of 90° runs ±90° from 95° after a +5° offset, so it sends
