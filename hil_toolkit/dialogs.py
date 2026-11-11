@@ -208,6 +208,8 @@ class AxisOffsetDialog(QDialog):
         gui = self.gui
         if not (gui.link.is_open() and gui.board_ready):
             return "Connect to the board, then enable Stream to Arm to jog."
+        if gui.twoway_switch.isChecked():
+            return "Offsets are jogged in stream mode. Turn Two-way off, then enable Stream to Arm."
         if not gui.streaming:
             return "Enable Stream to Arm to jog."
         if gui.gcode_runner is not None:
@@ -421,8 +423,8 @@ class CalibrationDialog(QDialog):
         if source == "apriltag":
             self.run_apriltag()
             return
-        if self.gui.streaming or self.gui.gcode_timer.isActive():
-            self.status.setText("Pause streaming and G-code first.")
+        if self.gui.streaming or self.gui.twoway_switch.isChecked() or self.gui.gcode_timer.isActive():
+            self.status.setText("Pause streaming, Two-way and G-code first.")
             return
         n = self.n_points.value()
         self.btn_run.setEnabled(False)

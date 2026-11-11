@@ -24,6 +24,7 @@ GCODE_FEED_MAX = 3000.0       # mm/min
 GCODE_RAPID = 2400.0          # mm/min for G0 / G28
 GCODE_ROT_SPEED = 60.0        # °/s for A/B changes (firmware servo limit)
 GCODE_ARC_SEG = 2.0           # mm per arc chord
+GCODE_ARC_CHORD_TOL = 1.0     # mm; two-way mode: furthest a chord may stray from the true arc
 GCODE_TICK_MS = 50
 GCODE_TRACK_TOL = 2.0         # mm; larger final error = target out of reach
 GCODE_PITCH_TOL = 1.0         # °
@@ -90,6 +91,41 @@ G0 X70 Y-120 Z150
 G1 Z110 F600
 M5                     ; release
 G4 P500
+G1 Z150 F900
+G28                    ; home
+M30
+"""
+
+# Shorter demo for two-way mode, where every line (and every arc chord) is one stop.
+TWOWAY_GCODE = """\
+; ELIOS demo, two-way mode: the arm stops at the end of every step
+G21 G90 G17            ; mm, absolute, XY arc plane
+G28                    ; start from the initial pose
+M5                     ; open gripper
+
+; 1. Pick
+G0 X0 Y-110 Z150       ; above the part
+G1 Z110 F600           ; slow descent
+M3 S70                 ; grip
+G4 P300
+G1 Z150 F900           ; lift
+
+; 2. Show the part to the camera
+G1 Y-170 Z210 A-20 F1200
+G1 Y-130 Z150 A0
+
+; 3. Rectangle, then a circle in the XY plane
+G1 X40 Y-100 F1500
+G1 Y-160
+G1 X-40
+G1 Y-100
+G1 X0
+G2 X0 Y-100 I0 J-30    ; full circle, R30
+
+; 4. Place
+G0 X70 Y-120 Z150
+G1 Z110 F600
+M5                     ; release
 G1 Z150 F900
 G28                    ; home
 M30
@@ -198,9 +234,12 @@ class GCodeProgram:
     # (u, v, normal) axis indices per plane; G18 is ZX by convention
     PLANES = {17: (0, 1, 2), 18: (2, 0, 1), 19: (1, 2, 0)}
 
-    def __init__(self, text, pos, pitch, roll):
+    def __init__(self, text, pos, pitch, roll, arc_chord_tol=None):
+        """arc_chord_tol (mm): split arcs into as few chords as this allows, instead of
+        one per GCODE_ARC_SEG mm."""
         self.segments = []
         self.warnings = []
+        self.arc_chord_tol = arc_chord_tol
         self._compile(text, np.array(pos, dtype=float), float(pitch), float(roll))
 
     @property
@@ -260,7 +299,7 @@ class GCodeProgram:
                         raise GCodeError(n, "G4 needs P<ms> or S<seconds>")
                     self.segments.append({"kind": "dwell", "line": n, "duration": max(0.0, secs)})
                 elif g == 28:
-                    self._move(n, np.array([pos, home]), (a, 0.0), (b, 0.0), GCODE_RAPID)
+                    self._move(n, np.array([pos, home]), (a, 0.0), (b, 0.0), GCODE_RAPID, rapid=True)
                     pos, a, b = home.copy(), 0.0, 0.0
                 else:
                     raise GCodeError(n, f"unsupported G{g}")
@@ -283,7 +322,7 @@ class GCodeProgram:
                 b1 = (b + words["B"] if relative else words["B"]) if "B" in words else b
                 if mode in (0, 1):
                     self._move(n, np.array([pos, target]), (a, a1), (b, b1),
-                               GCODE_RAPID if mode == 0 else feed)
+                               GCODE_RAPID if mode == 0 else feed, rapid=mode == 0)
                 else:
                     self._arc(n, pos, target, words, mode == 2, plane, (a, a1), (b, b1), feed)
                 pos, a, b = target, a1, b1
@@ -308,7 +347,7 @@ class GCodeProgram:
                 else:
                     raise GCodeError(n, f"unsupported M{m}")
 
-    def _move(self, n, pts, a, b, speed):
+    def _move(self, n, pts, a, b, speed, rapid=False):
         cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
         length = cum[-1]
         if length < 1e-9 and a[0] == a[1] and b[0] == b[1]:
@@ -317,7 +356,8 @@ class GCodeProgram:
                        abs(a[1] - a[0]) / GCODE_ROT_SPEED,
                        abs(b[1] - b[0]) / GCODE_ROT_SPEED, 1e-6)
         self.segments.append({"kind": "move", "line": n, "points": pts, "cum": cum,
-                              "length": length, "a": a, "b": b, "duration": duration})
+                              "length": length, "a": a, "b": b, "duration": duration,
+                              "speed": speed, "rapid": rapid})
 
     def _arc(self, n, start, end, words, cw, plane, a, b, feed):
         u, v, w = self.PLANES[plane]
@@ -338,7 +378,11 @@ class GCodeProgram:
         else:
             sweep = ((t1 - t0) % (2 * math.pi)) or 2 * math.pi
         helix = end[w] - start[w]
-        k = max(8, math.ceil(math.hypot(abs(sweep) * r0, helix) / GCODE_ARC_SEG))
+        if self.arc_chord_tol is None:
+            k = max(8, math.ceil(math.hypot(abs(sweep) * r0, helix) / GCODE_ARC_SEG))
+        else:
+            step = 2 * math.acos(max(1 - self.arc_chord_tol / r0, 0.0))   # sweep per chord
+            k = max(2, math.ceil(abs(sweep) / step))
         pts = np.empty((k + 1, 3))
         for i in range(k + 1):
             s = i / k

@@ -11,6 +11,10 @@ Thin line-oriented wrapper over pyserial for the slave firmware protocol:
       "BOOT reason=BROWNOUT"
       "STAT rx=120 bad=0 i2c=0 fix=0 reinit=0 spike=0 out=10.0,90.0,90.0,180.0,90.0,-"
 
+  two-way mode (6-axis-esp32-twoway; commands and answers are listed at the top of its .ino):
+      to the board:   "M,12,1,0.00,-110.00,150.00,0.00,0.00,40.0,10,CC\\n"
+      from the board: "ACK seq=12 t=1.23,CC"  "DONE seq=12 q=0.00,...,CC"  "ERR seq=12 reason=REACH,CC"
+
 The CRC is added here, so the rest of the toolkit only deals in the six fields.
 6-axis.ino (Uno) stops reading after six fields and simply ignores it.
 """
@@ -28,6 +32,7 @@ STAT_COUNTERS = ("rx", "bad", "i2c", "fix", "reinit", "spike")
 _STAT_RE = re.compile(r"^STAT " + " ".join(rf"{k}=(\d+)" for k in STAT_COUNTERS[:-1])
                       + r"(?: spike=(\d+))? out=(\S+)$")
 _BOOT_RE = re.compile(r"^BOOT reason=(\w+)$")
+_REPLY_RE = re.compile(r"^((OK|ACK|DONE|ERR) seq=(\d+)(?: (fw|t|q|reason)=(\S+))?),([0-9A-F]{2})$")
 
 
 def crc8(text):
@@ -63,6 +68,29 @@ def parse_boot_line(line):
     """Returns the reset reason from a BOOT line, or None."""
     m = _BOOT_RE.match(line)
     return m.group(1) if m else None
+
+
+def parse_reply(line):
+    """Returns {"kind", "seq", and "fw", "t", "q" or "reason" if present} from a two-way
+    answer, or None if `line` isn't one or fails its checksum. A dropped answer is
+    recovered by sending the command again."""
+    m = _REPLY_RE.match(line)
+    if m is None or crc8(m.group(1)) != int(m.group(6), 16):
+        return None
+    reply = {"kind": m.group(2), "seq": int(m.group(3))}
+    key, value = m.group(4), m.group(5)
+    try:
+        if key == "t":
+            value = float(value)
+        elif key == "q":
+            value = [float(f) for f in value.split(",")]
+            if len(value) != 5:
+                return None
+    except ValueError:
+        return None
+    if key:
+        reply[key] = value
+    return reply
 
 
 class SerialLink:

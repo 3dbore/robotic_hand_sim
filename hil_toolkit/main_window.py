@@ -24,13 +24,15 @@ from .hardware_mapping import (
     format_cmd,
     CAM_ASPECT, CAM_FOV_H, CAM_FOV_V, CAM_FOV_D,
 )
-from .serial_link import SerialLink, serial, parse_stat_line, parse_boot_line, STAT_COUNTERS
+from .serial_link import SerialLink, serial, parse_stat_line, parse_boot_line, parse_reply, STAT_COUNTERS
 from .calibration_camera import camera_pose, SimCalibrationCamera
 from .tags_toolkit.sim_tags import add_tags
 from .tags_toolkit.tag_model import TAGS, CALIB_TAG
 from .tags_toolkit.apriltag import AprilTagDetector, estimate_pose
 from .gcode import (GCodeProgram, GCodeError, GCodeRunner, DEFAULT_GCODE, CALIBRATION_GCODE,
-                    GCODE_HELP, GCODE_TICK_MS)
+                    TWOWAY_GCODE, GCODE_ARC_CHORD_TOL, GCODE_HELP, GCODE_TICK_MS)
+from . import waypoint
+from .waypoint import TwoWaySession, WaypointRunner, TWOWAY_FIRMWARE_ID
 from .tag_calibration import TagCalibrationSession, format_result
 from .widgets import (StatusDot, AspectBox, FocusSplitter, ServoRow, ToggleSwitch, make_card,
                       group_label, add_soft_shadow, add_viewfinder, add_distance_guides,
@@ -44,6 +46,8 @@ HEARTBEAT_S = 0.5
 STAT_MISSING_WARN_S = 3.0
 # Reset reasons that point at a fault rather than someone opening the port.
 FAULT_RESETS = {"BROWNOUT", "PANIC", "INT_WDT", "TASK_WDT", "WDT"}
+# Two-way mode: a manual target is sent once it has stopped changing for this long.
+TWOWAY_JOG_SETTLE_S = 0.25
 from .dialogs import JointGraphWindow, CalibrationDialog, AxisOffsetDialog
 
 
@@ -66,6 +70,16 @@ class HILToolkitGUI(QMainWindow):
         self.fw_boot_reason = None
         self.stream_started_at = 0.0
         self.stat_missing_warned = False
+        self.gcode_runner = None
+        # Two-way mode
+        self.tw_session = None
+        self.tw_leaving = False
+        self.tw_ready = False        # the board has the mapping and has been to the initial pose
+        self.tw_attached = False     # servos are holding a two-way position
+        self.board_q = (0.0,) * waypoint.JOINT_COUNT   # joint angles the board last reported
+        self.board_grip = None
+        self.tw_seen_target = None   # the manual target, and when it last changed
+        self.tw_seen_at = 0.0
         # Before the UI: each ServoRow's INV checkbox reads ch.sign when it is built
         direction_warnings = load_axis_directions()
 
@@ -130,7 +144,6 @@ class HILToolkitGUI(QMainWindow):
         # G-code state
         self.gcode_timer = QTimer()
         self.gcode_timer.timeout.connect(self.gcode_tick)
-        self.gcode_runner = None
         self._gcode_shown_line = None
         self.gcode_time_elapsed = 0.0
         # AprilTag camera calibration run (CalibrationDialog -> start_tag_calibration)
@@ -161,7 +174,7 @@ class HILToolkitGUI(QMainWindow):
         titles.setSpacing(2)
         title = QLabel("ELIOS Hardware-in-the-Loop")
         title.setObjectName("PageTitle")
-        subtitle = QLabel("Hardware-in-the-loop toolkit · simulation mirrored to Arduino Uno (6-axis.ino)")
+        subtitle = QLabel("Hardware-in-the-loop toolkit · simulation mirrored to the ESP32 arm")
         subtitle.setObjectName("PageSubtitle")
         titles.addWidget(title)
         titles.addWidget(subtitle)
@@ -387,13 +400,31 @@ class HILToolkitGUI(QMainWindow):
         ctl_row.addWidget(self.btn_release)
         lay.addLayout(ctl_row)
 
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(10)
+        self.twoway_switch = ToggleSwitch("Two-way")
+        self.twoway_switch.setToolTip(
+            "Off: the toolkit streams every servo angle (Stream to Arm).\n"
+            "On: the toolkit sends one coordinate; the board solves the joints, runs the move "
+            "and answers when it has finished. Needs the 6-axis-esp32-twoway firmware.")
+        self.twoway_switch.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.twoway_switch.toggled.connect(self.on_twoway_toggled)
+        self.mode_note = QLabel("")
+        self.mode_note.setObjectName("Muted")
+        self.mode_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # never widens the card
+        mode_row.addWidget(self.twoway_switch)
+        mode_row.addWidget(self.mode_note, 1)
+        lay.addLayout(mode_row)
+
         tx_row = QHBoxLayout()
         tx_col = QVBoxLayout()
         tx_col.setSpacing(2)
-        tx_col.addWidget(group_label("Last frame  D2,D3,D4,D5,D6,D8"))
+        self.tx_title = group_label("")
+        tx_col.addWidget(self.tx_title)
         self.tx_label = QLabel("—")
         self.tx_label.setObjectName("MetricSmall")
         self.tx_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.tx_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # coordinate lines are long
         tx_col.addWidget(self.tx_label)
         tx_row.addLayout(tx_col, 1)
         cnt_col = QVBoxLayout()
@@ -499,12 +530,14 @@ class HILToolkitGUI(QMainWindow):
     def on_board_ready(self):
         if self.link.is_open():
             self.board_ready = True
-            self.log_message("Board ready. Enable 'Stream to Arm' to drive the hardware.", "ok")
+            self.log_message("Board ready. Enable 'Stream to Arm' or 'Two-way' to drive the hardware.", "ok")
             self.update_link_ui()
 
     def disconnect_link(self, reason=None):
         if self.btn_stream.isChecked():
             self.btn_stream.setChecked(False)
+        self.leave_twoway("Two-way mode off: the link closed.", "warn")
+        self.tw_attached = False
         self.link.close()
         self.board_ready = False
         self.log_message(reason or "Disconnected.", "err" if reason else "info")
@@ -515,16 +548,32 @@ class HILToolkitGUI(QMainWindow):
         self.port_combo.setEnabled(not connected)
         self.btn_scan.setEnabled(not connected)
         self.btn_connect.setText("Disconnect" if connected else "Connect")
-        self.btn_stream.setEnabled(connected and self.board_ready)
+        two_way = self.twoway_switch.isChecked()
+        self.btn_stream.setEnabled(connected and self.board_ready and not two_way)
         self.btn_release.setEnabled(connected and self.board_ready)
+        # A running program belongs to one method, so the switch waits for it to end.
+        self.twoway_switch.setEnabled(connected and self.board_ready and self.gcode_runner is None)
         for row in self.servo_rows.values():
             if row.inv is not None:
-                row.inv.setEnabled(not self.streaming)
+                row.inv.setEnabled(not (self.streaming or two_way))
+
+        if two_way:
+            note = "board solves each move" if self.tw_ready else "starting…"
+        else:
+            note = "toolkit streams every step"
+        self.mode_note.setText(note)
+        self.mode_note.setToolTip(note)
+        self.tx_title.setText("Last command" if self.twoway_switch.isChecked()
+                              else "Last frame  D2,D3,D4,D5,D6,D8")
 
         if not connected:
             state, color, glow = "Disconnected", C["outline"], False
         elif not self.board_ready:
             state, color, glow = "Board resetting…", C["warning"], True
+        elif two_way and not self.tw_ready:
+            state, color, glow = f"Two-way starting · {self.link.port.port}", C["warning"], True
+        elif two_way:
+            state, color, glow = f"Two-way · {self.link.port.port}", C["primary"], True
         elif self.streaming:
             state, color, glow = f"Streaming · {self.link.port.port}", C["primary"], True
         else:
@@ -555,9 +604,14 @@ class HILToolkitGUI(QMainWindow):
         self.streaming = on
         if on:
             self.stream_started_at = time.monotonic()
+            if self.tw_attached:
+                # Coming from two-way mode the servos are already on, at the sim pose.
+                self.tw_attached = False
+                if self.send_line(",".join(format_cmd(c) for c in self.compute_commands()[0])):
+                    self.log_message("Streaming enabled, from the arm's current pose.", "ok")
             # First frame attaches each servo instantly at the given angle, so
             # attach at the known initial pose; later frames are speed-limited.
-            if self.send_line(self.home_line()):
+            elif self.send_line(self.home_line()):
                 if np.any(np.abs(ase.current_angles) > 0.5) or self.gripper_cmd != GRIPPER.home:
                     self.log_message("Streaming: attached at initial position, "
                                      "arm will travel to current sim pose at firmware speed.", "warn")
@@ -567,9 +621,160 @@ class HILToolkitGUI(QMainWindow):
             self.log_message("Streaming paused. Servos hold their last position.")
         self.update_link_ui()
 
+    # ── Two-way mode ─────────────────────────────────────────────────────────
+    def on_twoway_toggled(self, on):
+        if on and not (self.link.is_open() and self.board_ready):
+            self.twoway_switch.setChecked(False)
+            return
+        if on:
+            if self.btn_stream.isChecked():
+                self.btn_stream.setChecked(False)
+            self.log_message("Two-way mode: checking the firmware and sending the axis mapping.")
+            self.tw_ready = False
+            self.tw_session = TwoWaySession(self.send_line, time.monotonic)
+            self.tw_session.request("V", on_done=self.on_twoway_hello, on_fail=self.on_twoway_setup_failed)
+        else:
+            self.tw_ready = False
+            session, self.tw_session = self.tw_session, None
+            if session is not None:
+                session.close(stop_board=self.link.is_open())
+            if not self.tw_leaving:      # leave_twoway() has already said why
+                self.log_message("Two-way mode off. Servos hold their last position; "
+                                 "use Stream to Arm to drive them.")
+        # Swap the demo program with the mode, but never replace the user's own text.
+        text = self.gcode_text.toPlainText()
+        if on and text == DEFAULT_GCODE:
+            self.gcode_text.setPlainText(TWOWAY_GCODE)
+        elif not on and text == TWOWAY_GCODE:
+            self.gcode_text.setPlainText(DEFAULT_GCODE)
+        self.update_link_ui()
+
+    def on_twoway_hello(self, reply):
+        if reply.get("fw") != TWOWAY_FIRMWARE_ID:
+            self.leave_twoway(f"Two-way mode off: the board runs firmware {reply.get('fw')}, "
+                              f"this toolkit needs {TWOWAY_FIRMWARE_ID}. Reflash 6-axis-esp32-twoway.")
+            return
+        session = self.tw_session        # a failed write can end the mode between these requests
+        for fields in waypoint.config_fields():
+            session.request("C", fields, on_fail=self.on_twoway_setup_failed)
+        grip = GRIPPER.command(GRIPPER.effective_home)
+        session.request("H", format_cmd(grip), on_done=lambda r: self.on_twoway_homed(r, grip),
+                        on_fail=self.on_twoway_setup_failed)
+
+    def on_twoway_homed(self, reply, grip):
+        self.board_q = tuple(reply["q"])
+        self.board_grip = grip
+        self.tw_ready = True
+        self.tw_attached = True
+        self.tw_seen_target = None
+        if np.any(np.abs(ase.current_angles) > 0.5) or self.gripper_cmd != GRIPPER.home:
+            self.log_message("Two-way mode ready: arm is at the initial position and will now "
+                             "travel to the current sim pose.", "warn")
+        else:
+            self.log_message("Two-way mode ready.", "ok")
+        self.update_link_ui()
+
+    def on_twoway_setup_failed(self, reason):
+        if reason == "TIMEOUT":
+            self.leave_twoway("Two-way mode off: no answer from the board. "
+                              "Flash slave_code/6-axis-esp32-twoway to use this mode.")
+        else:
+            self.leave_twoway("Two-way mode off: " + waypoint.REASONS.get(reason, reason) + ".")
+
+    def leave_twoway(self, reason, level="err"):
+        """Turns the mode off after something went wrong, ending any program it was running."""
+        if not self.twoway_switch.isChecked():
+            return
+        if isinstance(self.gcode_runner, WaypointRunner):
+            self.stop_program("Stopped")
+        self.log_message(reason, level)
+        self.tw_leaving = True
+        self.twoway_switch.setChecked(False)
+        self.tw_leaving = False
+
+    def send_move(self, pose, linear, speed, on_done, on_fail):
+        grip = self.gripper_output()
+        def done(reply):
+            self.board_q = tuple(reply["q"])
+            self.board_grip = grip
+            on_done(reply["q"])
+        self.tw_session.request("M", waypoint.move_fields(pose, linear, speed, grip),
+                                on_done=done, on_fail=on_fail)
+
+    def set_sim_to(self, q):
+        """Puts the sim where the board says the arm is."""
+        ase.current_angles = np.array(q, dtype=float)
+        ase.desired_global_pitch = q[1] + q[2] + q[3]
+        ase.desired_global_roll = q[4]
+        ase.update_scene(ase.current_angles)
+        self.refresh_views()
+
+    def twoway_tick(self):
+        """Sends a manual change (jog, Reset, gripper) as one move, once it has settled."""
+        self.tw_session.tick()
+        if self.tw_session is None or not self.tw_ready or self.gcode_runner is not None or self.tw_session.busy:
+            return
+        pose = waypoint.wire_pose(waypoint.fk(ase.current_angles))
+        target = (pose, self.gripper_output())
+        now = time.monotonic()
+        if target != self.tw_seen_target:
+            self.tw_seen_target = target
+            self.tw_seen_at = now
+            return
+        if now - self.tw_seen_at < TWOWAY_JOG_SETTLE_S:
+            return
+        if waypoint.poses_match(pose, waypoint.fk(self.board_q)) and target[1] == self.board_grip:
+            return
+
+        def done(q):
+            if waypoint.wire_pose(waypoint.fk(ase.current_angles)) == pose:
+                self.set_sim_to(q)
+
+        def failed(reason):
+            if reason == "TIMEOUT":
+                self.on_twoway_setup_failed(reason)
+                return
+            if waypoint.poses_match(pose, waypoint.fk(self.board_q)):
+                self.board_grip = target[1]   # sending the same pose again would only repeat this
+            self.set_sim_to(self.board_q)
+            self.log_message("Two-way: move refused, " + waypoint.REASONS.get(reason, reason)
+                             + ". Sim returned to the arm's position.", "warn")
+
+        self.send_move(pose, False, 0.0, done, failed)
+
+    def on_step_done(self, q):
+        if isinstance(self.gcode_runner, WaypointRunner):
+            self.gcode_runner.step_done(q)
+
+    def on_step_failed(self, reason):
+        if reason == "TIMEOUT":
+            self.leave_twoway("G-code stopped: the board stopped answering. It may still be finishing "
+                              "the move. Check the arm, then turn Two-way on again.")
+            return
+        line = self.gcode_runner.line if self.gcode_runner is not None else None
+        self.stop_program(f"Error · L{line}")
+        if line is not None:
+            self.highlight_gcode_line(line, C["error_container"])
+        self.set_sim_to(self.board_q)
+        self.log_message(f"G-code stopped at line {line}: " + waypoint.REASONS.get(reason, reason) + ".", "err")
+
+    def on_twoway_stopped(self, reply):
+        self.board_q = tuple(reply["q"])
+        self.set_sim_to(self.board_q)
+
+    def manual_blocked(self):
+        """In two-way mode a loaded program owns the arm: its plan starts from each stop."""
+        if self.twoway_switch.isChecked() and self.gcode_runner is not None:
+            self.log_message("Manual override is off while a program is loaded in two-way mode. "
+                             "Press Reset on it first.", "warn")
+            return True
+        return False
+
     def release_servos(self):
         if self.btn_stream.isChecked():
             self.btn_stream.setChecked(False)
+        self.leave_twoway("Two-way mode off: servos released.", "warn")
+        self.tw_attached = False
         if self.link.is_open():
             # Nothing repeats this frame once streaming is off, so don't bet on one copy.
             line = "," * (len(SERVO_CHANNELS) - 1)
@@ -599,6 +804,8 @@ class HILToolkitGUI(QMainWindow):
         before = np.array(ase.current_angles, dtype=float)
         for w in apply_effective_limits():
             self.log_message(w, "warn")
+        # The board's copy of the mapping is now out of date.
+        self.leave_twoway("Two-way mode off: the axis offsets changed. Turn it on again to apply them.", "warn")
         if not np.array_equal(before, ase.current_angles):
             ase.update_scene(ase.current_angles)
             self.refresh_views()
@@ -648,6 +855,8 @@ class HILToolkitGUI(QMainWindow):
                 return
             for line in lines:
                 self.handle_rx_line(line)
+            if self.tw_session is not None:
+                self.twoway_tick()
             if self.streaming:
                 now = time.monotonic()
                 line = ",".join(format_cmd(c) for c in cmds)
@@ -661,6 +870,11 @@ class HILToolkitGUI(QMainWindow):
                                      "commands and has no link checks.", "warn")
 
     def handle_rx_line(self, line):
+        reply = parse_reply(line)
+        if reply is not None:
+            if self.tw_session is not None:
+                self.tw_session.on_reply(reply)
+            return
         stat = parse_stat_line(line)
         if stat is not None:
             self.on_firmware_stat(stat)
@@ -687,7 +901,13 @@ class HILToolkitGUI(QMainWindow):
     def on_firmware_boot(self, reason):
         self.fw_boot_reason = reason or "unknown"
         self.fw_stat = None
-        if self.streaming:
+        self.tw_attached = False
+        if self.twoway_switch.isChecked():
+            # As with streaming: re-attaching could brown out the same supply again.
+            self.leave_twoway(f"Board rebooted in two-way mode (reason: {self.fw_boot_reason}). "
+                              "Two-way mode is off and servos are released. A brownout means the "
+                              "supply sagged: check the servo power before turning it on again.")
+        elif self.streaming:
             # The reboot left every servo released. Re-attaching here could brown out
             # the same supply again and loop, so that decision goes back to the user.
             self.btn_stream.setChecked(False)
@@ -704,12 +924,20 @@ class HILToolkitGUI(QMainWindow):
         if self.gcode_timer.isActive():
             return
         if self.gcode_runner is None:
+            two_way = self.twoway_switch.isChecked()
+            if two_way and (not self.tw_ready or self.tw_session.busy):
+                self.log_message("G-code: wait for the arm. It is still "
+                                 + ("starting two-way mode." if not self.tw_ready else "moving."), "warn")
+                return
             if self.tag_calib is None:   # a new program clears a finished calibration's read-out
                 self.clear_calibration_display()
             _, _, ee = ase.forward_kinematics(ase.current_angles)
             try:
                 program = GCodeProgram(self.gcode_text.toPlainText(), ee,
-                                       ase.desired_global_pitch, ase.desired_global_roll)
+                                       ase.desired_global_pitch, ase.desired_global_roll,
+                                       arc_chord_tol=GCODE_ARC_CHORD_TOL if two_way else None)
+                # Checked whole before the arm moves: the board would refuse the same moves.
+                steps = waypoint.compile_steps(program, self.board_q, ase.current_angles) if two_way else None
             except GCodeError as e:
                 self.log_message(f"G-code: {e}", "err")
                 self.highlight_gcode_line(e.line, C["error_container"])
@@ -720,33 +948,53 @@ class HILToolkitGUI(QMainWindow):
             if not program.segments:
                 self.log_message("G-code: nothing to run.", "warn")
                 return
-            self.gcode_runner = GCodeRunner(program)
+            self.gcode_runner = WaypointRunner(steps, self.board_q) if two_way else GCodeRunner(program)
             self.gcode_time_elapsed = 0.0
             self.graph_window.reset_plot()
             self.gcode_text.setReadOnly(True)
-            self.log_message(f"G-code: started · {len(program.segments)} steps · "
-                             f"~{program.duration:.0f} s", "ok")
+            if two_way:
+                stops = sum(s["kind"] == "move" for s in steps)
+                self.log_message(f"G-code: started two-way · {stops} stops · "
+                                 f"~{self.gcode_runner.duration:.0f} s", "ok")
+            else:
+                self.log_message(f"G-code: started · {len(program.segments)} steps · "
+                                 f"~{program.duration:.0f} s", "ok")
+            self.update_link_ui()
         else:
             self.log_message("G-code: resumed.")
         self.gcode_timer.start(GCODE_TICK_MS)
 
     def pause_gcode(self):
         if self.gcode_timer.isActive():
+            runner = self.gcode_runner
+            if isinstance(runner, WaypointRunner) and runner.in_flight:
+                # The timer keeps running: the sim follows the arm to the end of this stop.
+                runner.pause_requested = True
+                self.gcode_status.setText(f"Pausing · L{runner.line}")
+                self.log_message("G-code: pausing at the end of this move.")
+                return
             self.gcode_timer.stop()
             self.gcode_status.setText(f"Paused · L{self.gcode_runner.line}")
             self.log_message("G-code: paused.")
 
     def reset_gcode(self):
-        self.gcode_timer.stop()
-        self.finish_gcode()
-        if self.tag_calib is not None:
-            self.tag_calib = None
-            self.restore_gcode_text()
-            self.log_message("Calibration: aborted — nothing saved.", "warn")
+        if (isinstance(self.gcode_runner, WaypointRunner) and self.gcode_runner.in_flight
+                and self.tw_session is not None):
+            self.tw_session.abort(on_done=self.on_twoway_stopped, on_fail=self.on_twoway_setup_failed)
+        self.stop_program()
         self.clear_calibration_display()
         self.gcode_time_elapsed = 0.0
         self.graph_window.reset_plot()
         self.log_message("G-code: reset.")
+
+    def stop_program(self, status="Ready"):
+        self.gcode_timer.stop()
+        self.finish_gcode(status)
+        if self.tag_calib is not None:
+            self.tag_calib = None
+            self.restore_gcode_text()
+            self.clear_calibration_display()
+            self.log_message("Calibration: aborted — nothing saved.", "warn")
 
     def finish_gcode(self, status="Ready"):
         self.gcode_runner = None
@@ -754,6 +1002,7 @@ class HILToolkitGUI(QMainWindow):
         self.gcode_text.setReadOnly(False)
         self.gcode_text.setExtraSelections([])
         self.gcode_status.setText(status)
+        self.update_link_ui()
 
     def highlight_gcode_line(self, line, color):
         block = self.gcode_text.document().findBlockByNumber(line - 1)
@@ -789,6 +1038,14 @@ class HILToolkitGUI(QMainWindow):
                 self.gcode_timer.stop()
                 self.gcode_status.setText(f"Paused · L{payload}")
                 self.log_message(f"G-code: M0 pause at line {payload} — press Run to continue.", "warn")
+            elif kind == "paused":
+                self.gcode_timer.stop()
+                self.gcode_status.setText(f"Paused · L{payload}")
+                self.log_message("G-code: paused.")
+            elif kind == "send":
+                if self.tw_session is not None:
+                    self.send_move(payload["pose"], payload["linear"], payload["speed"],
+                                   self.on_step_done, self.on_step_failed)
             elif kind == "end":
                 self.gcode_timer.stop()
                 self.finish_gcode("Done")
@@ -802,12 +1059,13 @@ class HILToolkitGUI(QMainWindow):
             if line != self._gcode_shown_line:
                 self.highlight_gcode_line(line, C["primary_fixed"])
                 self._gcode_shown_line = line
-            self.gcode_status.setText(f"Running · L{line}")
+            pausing = isinstance(runner, WaypointRunner) and runner.pause_requested
+            self.gcode_status.setText(f"{'Pausing' if pausing else 'Running'} · L{line}")
 
     # ── AprilTag camera calibration ──────────────────────────────────────────
     def start_tag_calibration(self):
-        """Run CALIBRATION_GCODE through the normal G-code path (so it streams to
-        the arm like any program); every M240 captures the hand's tag (id 0). Returns False if it could not start."""
+        """Run CALIBRATION_GCODE through the normal G-code path (so it reaches the arm
+        like any program); every M240 captures the hand's tag (id 0). Returns False if it could not start."""
         if self.gcode_runner is not None:
             self.log_message("Calibration: reset the current G-code program first.", "warn")
             return False
@@ -896,18 +1154,26 @@ class HILToolkitGUI(QMainWindow):
         self.plotter.interactor.Render()
 
     def move_arm(self, direction, amount):
+        if self.manual_blocked():
+            return
         ase.move_ee(direction, amount)
         self.refresh_views()
 
     def rotate_ee_ui(self, axis, amount):
+        if self.manual_blocked():
+            return
         ase.rotate_ee(axis, amount)
         self.refresh_views()
 
     def rotate_base_ui(self, amount):
+        if self.manual_blocked():
+            return
         ase.rotate_base(amount)
         self.refresh_views()
 
     def reset_arm_ui(self):
+        if self.manual_blocked():
+            return
         ase.current_angles = np.zeros(5)
         ase.cam_elevation = 0.0
         ase.desired_global_pitch = 0.0
@@ -1115,6 +1381,7 @@ class HILToolkitGUI(QMainWindow):
         self.tag_timer.stop()
         if self.tag_cam is not None:
             self.tag_cam.close()
+        self.leave_twoway("Two-way mode off: closing.", "info")
         self.link.close()
         for p in (self.plotter, self.cam_plotter, self.ee_plotter):
             p.close()
