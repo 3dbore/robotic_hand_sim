@@ -106,7 +106,7 @@ enum Axis { GRIPPER = 0, WRIST_YAW, WRIST_PITCH, ARM_B, ARM_A, BASE, AXIS_COUNT 
 const uint8_t PCA_LABEL[AXIS_COUNT] = {
   16,   // GRIPPER
   11,   // WRIST_YAW
-  5,    // WRIST_PITCH
+  8,    // WRIST_PITCH
   3,    // ARM_B
   1,    // ARM_A (primary)
   0     // BASE  -> BASE_PIN
@@ -126,8 +126,43 @@ const int SERVO_MAX_US = 2500;
 const int ANGLE_LIMIT_MIN = -36;
 const int ANGLE_LIMIT_MAX = 216;
 
-// Speed limit (same as Uno firmware)
+// Two-way moves: top servo speed of the planned path, which already starts and stops
+// smoothly. Keep in step with MAX_SERVO_SPEED in hil_toolkit/waypoint.py.
 const float MAX_SPEED_DEG_PER_SEC = 60.0f;
+
+// Stream motion, per axis in serial field order. Each axis ramps its speed up and
+// down at its acceleration limit, so a move starts and stops gently instead of
+// slamming the arm's momentum into the gear backlash (which is what makes it ring).
+// The heavy arm joints get the lowest limits. Lower a joint's numbers if it still
+// oscillates at the end of a move; raise them if it lags too far behind the sim.
+//                                                    Grip   Yaw  Pitch  ArmB  ArmA  Base
+const float AXIS_MAX_SPEED_DEG_PER_SEC[AXIS_COUNT]  = {  90,   45,   45,   30,   30,   40 };
+const float AXIS_MAX_ACCEL_DEG_PER_SEC2[AXIS_COUNT] = { 300,  120,  120,   60,   60,   90 };
+
+// Anti-backlash approach: every move ends travelling in the axis's APPROACH_DIR
+// (+1 = increasing servo angle, -1 = decreasing, 0 = off), so the gear slack is always
+// taken up on the same side and the joint stops at the same point every time. A move
+// the other way runs APPROACH_OVERSHOOT_DEG past its target and comes back.
+// For a joint that carries weight, pick the direction that LIFTS it: gravity then
+// holds the slack closed. Check each one on the real arm, with the motors powered:
+// jog the servo angle up and see whether the joint rises. Don't infer it from the sign
+// in hardware_mapping.py: calibration/axis_directions.json can override that sign.
+// The gripper is off: overshooting it would squeeze or bump its end stop.
+// Base: a servo through a planetary gear, which has play too.
+//                                   Grip  Yaw  Pitch  ArmB  ArmA  Base
+const int APPROACH_DIR[AXIS_COUNT] = {  0,   +1,   +1,   +1,   -1,   +1 };
+const float APPROACH_OVERSHOOT_DEG = 3.0f;   // a bit more than the play you can feel by hand
+// The approach runs once, after the target has stopped changing for this long. A slow
+// stream move arrives as 0.5 deg steps; dipping past every one of them made the joint
+// saw back and forth by APPROACH_OVERSHOOT_DEG for the whole move.
+const unsigned long APPROACH_SETTLE_MS = 250;
+
+// Hold deadband: an axis at rest ignores a new stream target closer than this, so the
+// servo isn't nudged back and forth inside its backlash while it should be holding.
+// Just over one 0.5 deg command step. A lone smaller change is jitter and is never
+// carried out; the same value in two frames in a row is meant (the toolkit sends an
+// offset jog twice, and its heartbeat repeats a pose that has settled). 0 turns this off.
+const float HOLD_DEADBAND_DEG = 0.6f;
 
 // Spike gate. A frame that passes its checksum can still carry a wrong value (a
 // "180" that arrived as "18"). A target further than SPIKE_GATE_DEG from the last
@@ -139,9 +174,9 @@ const float SPIKE_GATE_DEG = 20.0f;
 const float SPIKE_MATCH_DEG = 3.0f;
 const int SPIKE_CONFIRM_FRAMES = 2;
 
-// Low-pass on the accepted target, applied before the speed limit. Smooths small
-// jitter and the stair-steps of a 20 Hz stream. 0 turns it off.
-const float SMOOTHING_TAU_MS = 80.0f;
+// Low-pass on the motion after the speed and acceleration limits. Rounds off the
+// stair-steps of a 20 Hz stream and the corners of each speed ramp. 0 turns it off.
+const float SMOOTHING_TAU_MS = 150.0f;
 const float SMOOTHING_SNAP_DEG = 0.05f;   // closer than this, land exactly on target
 
 // true  = empty field releases the servo (no PWM pulse)
@@ -195,10 +230,15 @@ bool attached[AXIS_COUNT] = {false};
 bool pendingAttach[AXIS_COUNT] = {false};
 float currentAngle[AXIS_COUNT];
 float targetAngle[AXIS_COUNT];
-float smoothAngle[AXIS_COUNT];          // targetAngle after the low-pass, before the speed limit
+float smoothAngle[AXIS_COUNT];          // speed/acceleration profile toward targetAngle, before the low-pass
+float velocity[AXIS_COUNT] = {0};       // deg/s of smoothAngle, for the acceleration limit
+bool approaching[AXIS_COUNT] = {false}; // heading for the anti-backlash point past the target
+bool needsApproach[AXIS_COUNT] = {false};  // last travelled against APPROACH_DIR; approach once settled
+unsigned long targetChangedMs[AXIS_COUNT] = {0};
 
 bool haveAccepted[AXIS_COUNT] = {false};   // false until the first frame after start/release
 float candidateAngle[AXIS_COUNT];          // out-of-gate value waiting for confirmation
+float holdCandidate[AXIS_COUNT] = {NAN, NAN, NAN, NAN, NAN, NAN};   // last in-deadband value, see HOLD_DEADBAND_DEG
 int candidateCount[AXIS_COUNT] = {0};
 
 uint16_t expectedTicks[PCA_CHANNELS];   // what each channel should hold
@@ -244,6 +284,7 @@ bool homed = false;                     // jointQ describes where the servos are
 double jointQ[kin::JOINT_COUNT] = {0};
 kin::Plan movePlan;
 double moveElapsed = 0.0;
+int8_t planDir[AXIS_COUNT] = {0};       // last direction each joint moved in the plan
 unsigned long lastPlanMs = 0;
 unsigned long settleStartMs = 0;
 
@@ -281,21 +322,46 @@ static bool pcaRead(uint8_t reg, uint8_t *data, uint8_t count) {
   return noteI2c(true);
 }
 
-// All four registers go out in one transaction; the PCA applies them together at the STOP.
-static bool pcaWriteChannel(uint8_t channel) {
-  uint16_t ticks = expectedTicks[channel];
+// Neighbouring channels, four registers each, go out in one transaction; the PCA
+// applies them all together at the STOP.
+static bool pcaWriteChannels(uint8_t first, uint8_t count) {
   Wire.beginTransmission(PCA_ADDR);
-  Wire.write((uint8_t)(REG_LED0_ON_L + 4 * channel));
-  Wire.write((uint8_t)0);
-  Wire.write((uint8_t)0);
-  Wire.write((uint8_t)(ticks & 0xFF));
-  Wire.write((uint8_t)(ticks >> 8));
+  Wire.write((uint8_t)(REG_LED0_ON_L + 4 * first));
+  for (uint8_t ch = first; ch < first + count; ch++) {
+    uint16_t ticks = expectedTicks[ch];
+    Wire.write((uint8_t)0);
+    Wire.write((uint8_t)0);
+    Wire.write((uint8_t)(ticks & 0xFF));
+    Wire.write((uint8_t)(ticks >> 8));
+  }
   return noteI2c(Wire.endTransmission() == 0);
+}
+
+static bool pcaWriteChannel(uint8_t channel) {
+  return pcaWriteChannels(channel, 1);
 }
 
 static void pcaSetChannel(uint8_t channel, uint16_t ticks) {
   expectedTicks[channel] = ticks;
   pcaWriteChannel(channel);   // a failed write is put right by the next verify pass
+}
+
+// Arm A's two motors share one shaft. When their channels are neighbours both go out
+// in one transaction, so the pair always changes together and a failed write can't
+// leave one motor pulling against the other.
+static void setArmA(uint16_t primaryTicks, uint16_t mirrorTicks) {
+  uint8_t primary = pcaChannel(PCA_LABEL[ARM_A]);
+  uint8_t mirror = pcaChannel(ARM_A_MIRROR_LABEL);
+  expectedTicks[primary] = primaryTicks;
+  expectedTicks[mirror] = mirrorTicks;
+  if (mirror == primary + 1) {
+    pcaWriteChannels(primary, 2);
+  } else if (primary == mirror + 1) {
+    pcaWriteChannels(mirror, 2);
+  } else {
+    pcaWriteChannel(primary);
+    pcaWriteChannel(mirror);
+  }
 }
 
 static void pcaConfigure() {
@@ -349,12 +415,12 @@ static void writeAxis(int axis, float angle) {
     basePwm.write((uint32_t)lroundf(angleToUs(angle) / BASE_US_PER_TICK));
     return;
   }
-  pcaSetChannel(pcaChannel(PCA_LABEL[axis]), angleToTicks(angle));
-
   if (axis == ARM_A) {
     float mirrored = 180.0f - angle + ARM_A_MIRROR_TRIM_DEG;
-    pcaSetChannel(pcaChannel(ARM_A_MIRROR_LABEL), angleToTicks(mirrored));
+    setArmA(angleToTicks(angle), angleToTicks(mirrored));
+    return;
   }
+  pcaSetChannel(pcaChannel(PCA_LABEL[axis]), angleToTicks(angle));
 }
 
 // ---------- attach / release ----------
@@ -363,15 +429,40 @@ static void attachBase() {
   basePwm.attachPin(BASE_PIN, PWM_HZ, BASE_PWM_BITS);
 }
 
+// Forgets any speed the axis had: it starts from standstill.
+static void resetMotion(int axis) {
+  velocity[axis] = 0.0f;
+  approaching[axis] = false;
+  needsApproach[axis] = false;
+}
+
+// Standing still at its target, with nothing left to do.
+static bool atRest(int axis) {
+  return currentAngle[axis] == targetAngle[axis] && smoothAngle[axis] == targetAngle[axis] &&
+         velocity[axis] == 0.0f && !approaching[axis] && !needsApproach[axis];
+}
+
+// Where the anti-backlash approach turns around: APPROACH_OVERSHOOT_DEG short of the
+// target, seen from the approach direction. Kept inside the standard 0..180 range
+// unless the target itself is outside it.
+static float approachPoint(int axis) {
+  float point = targetAngle[axis] - APPROACH_DIR[axis] * APPROACH_OVERSHOOT_DEG;
+  float lo = fminf(targetAngle[axis], 0.0f);
+  float hi = fmaxf(targetAngle[axis], 180.0f);
+  return fminf(fmaxf(point, lo), hi);
+}
+
 static void moveServo(int axis, float angle) {
   if (!attached[axis] && !pendingAttach[axis]) {
     // Like the Uno firmware: the first command after release is where it starts
     // (we don't know where the unpowered servo was left). Later frames that arrive
     // before its turn in the queue only move the target, so they stay speed-limited.
     pendingAttach[axis] = true;
+    resetMotion(axis);
     currentAngle[axis] = angle;
     smoothAngle[axis] = angle;
   }
+  if (angle != targetAngle[axis]) targetChangedMs[axis] = millis();
   targetAngle[axis] = angle;
 }
 
@@ -381,10 +472,24 @@ static void acceptTarget(int axis, float angle) {
     if (candidateCount[axis] > 0) countSpike++;   // the held value was a one-off
     candidateCount[axis] = 0;
     haveAccepted[axis] = true;
+    // Hold deadband: see HOLD_DEADBAND_DEG.
+    if (attached[axis] && atRest(axis) && fabsf(angle - targetAngle[axis]) < HOLD_DEADBAND_DEG &&
+        angle != holdCandidate[axis]) {
+      holdCandidate[axis] = angle;
+      return;
+    }
     moveServo(axis, angle);
     return;
   }
-  if (candidateCount[axis] > 0 && fabsf(angle - candidateAngle[axis]) <= SPIKE_MATCH_DEG) {
+  // Agreement: the held value again, or a value carrying on the same way from it. A
+  // fast honest move (a slider drag) never repeats a value, but it keeps its direction;
+  // a corrupted digit is a one-off that the next frame doesn't follow.
+  float fromCandidate = angle - candidateAngle[axis];
+  if (candidateCount[axis] > 0 &&
+      (fabsf(fromCandidate) <= SPIKE_MATCH_DEG ||
+       (fromCandidate * (candidateAngle[axis] - targetAngle[axis]) > 0.0f &&
+        fabsf(fromCandidate) <= SPIKE_GATE_DEG))) {
+    candidateAngle[axis] = angle;
     candidateCount[axis]++;
   } else {
     if (candidateCount[axis] > 0) countSpike++;   // the previous candidate never repeated
@@ -420,11 +525,12 @@ static void releaseServo(int axis) {
     pinMode(BASE_PIN, OUTPUT);
     digitalWrite(BASE_PIN, LOW);
   } else {
-    pcaSetChannel(pcaChannel(PCA_LABEL[axis]), TICKS_FULL_OFF);
-    if (axis == ARM_A) pcaSetChannel(pcaChannel(ARM_A_MIRROR_LABEL), TICKS_FULL_OFF);
+    if (axis == ARM_A) setArmA(TICKS_FULL_OFF, TICKS_FULL_OFF);
+    else pcaSetChannel(pcaChannel(PCA_LABEL[axis]), TICKS_FULL_OFF);
   }
 
   attached[axis] = false;
+  resetMotion(axis);
   currentAngle[axis] = 90.0f;
   targetAngle[axis] = 90.0f;
   smoothAngle[axis] = 90.0f;
@@ -438,24 +544,68 @@ static void forgetAxis(int axis) {
 
 // ---------- motion ----------
 
+// Each tick every axis runs a trapezoidal speed profile toward its target: speed changes
+// by at most its acceleration limit, never exceeds its speed limit, and is always low
+// enough to stop on the target. The low-pass then rounds off the profile's corners.
+// A low-pass is a weighted average of past positions, so it can't overshoot or add
+// acceleration: the limits still hold at the servo.
 static void updateServoPositions(unsigned long now) {
-  unsigned long dt = now - lastMotionMs;
-  if (dt < MOTION_PERIOD_MS) return;
+  unsigned long dtMs = now - lastMotionMs;
+  if (dtMs < MOTION_PERIOD_MS) return;
   lastMotionMs = now;
-  if (dt > MAX_MOTION_DT_MS) dt = MAX_MOTION_DT_MS;
-  float maxStep = MAX_SPEED_DEG_PER_SEC * (dt / 1000.0f);
-  float blend = (SMOOTHING_TAU_MS > 0.0f) ? 1.0f - expf(-(float)dt / SMOOTHING_TAU_MS) : 1.0f;
+  if (dtMs > MAX_MOTION_DT_MS) dtMs = MAX_MOTION_DT_MS;
+  float dt = dtMs / 1000.0f;
+  float blend = (SMOOTHING_TAU_MS > 0.0f) ? 1.0f - expf(-(float)dtMs / SMOOTHING_TAU_MS) : 1.0f;
 
   for (int i = 0; i < AXIS_COUNT; i++) {
-    if (!attached[i] || (currentAngle[i] == targetAngle[i] && smoothAngle[i] == targetAngle[i])) continue;
+    if (!attached[i] || atRest(i)) continue;
 
-    smoothAngle[i] += (targetAngle[i] - smoothAngle[i]) * blend;
-    if (fabsf(targetAngle[i] - smoothAngle[i]) < SMOOTHING_SNAP_DEG) smoothAngle[i] = targetAngle[i];
+    // Anti-backlash: an axis that got to its target travelling against APPROACH_DIR
+    // waits until the target has settled, then goes past it and comes back once.
+    int dir = APPROACH_DIR[i];
+    if (dir != 0 && !approaching[i]) {
+      if (velocity[i] * dir < 0.0f) needsApproach[i] = true;
+      else if (velocity[i] * dir > 0.0f) needsApproach[i] = false;
+      if (needsApproach[i] && velocity[i] == 0.0f && smoothAngle[i] == targetAngle[i] &&
+          now - targetChangedMs[i] >= APPROACH_SETTLE_MS) {
+        needsApproach[i] = false;
+        approaching[i] = true;
+      }
+    }
+    float goal = targetAngle[i];
+    if (approaching[i]) {
+      float point = approachPoint(i);
+      // At or beyond the turning point and no longer moving the wrong way: the rest
+      // of the move is in the approach direction.
+      if ((point - smoothAngle[i]) * dir >= 0.0f && velocity[i] * dir >= 0.0f) approaching[i] = false;
+      else goal = point;
+    }
 
+    // Profile, in smoothAngle.
+    float accel = AXIS_MAX_ACCEL_DEG_PER_SEC2[i];
+    float maxDv = accel * dt;
+    float err = goal - smoothAngle[i];
+    // Fastest speed that still stops exactly on the goal when it is cut by maxDv every
+    // tick (the discrete form of sqrt(2 * accel * distance)).
+    float stopTicks = 0.5f * (sqrtf(1.0f + 8.0f * fabsf(err) / (maxDv * dt)) - 1.0f);
+    float want = fminf(stopTicks * maxDv, AXIS_MAX_SPEED_DEG_PER_SEC[i]);
+    if (err < 0.0f) want = -want;
+    // Stopping this tick is only allowed from a speed one tick's change can take away.
+    bool canStop = fabsf(velocity[i]) <= maxDv;
+    velocity[i] += fmaxf(-maxDv, fminf(maxDv, want - velocity[i]));
+    float step = velocity[i] * dt;
+    if (canStop && ((step * err > 0.0f && fabsf(step) >= fabsf(err)) || fabsf(err) < SMOOTHING_SNAP_DEG)) {
+      smoothAngle[i] = goal;   // arrived
+      velocity[i] = 0.0f;
+    } else {
+      smoothAngle[i] += step;
+    }
+
+    // Low-pass, in currentAngle.
     float before = currentAngle[i];
-    float diff = smoothAngle[i] - currentAngle[i];
-    if (fabsf(diff) <= maxStep) currentAngle[i] = smoothAngle[i];
-    else currentAngle[i] += (diff > 0) ? maxStep : -maxStep;
+    currentAngle[i] += (smoothAngle[i] - currentAngle[i]) * blend;
+    if (velocity[i] == 0.0f && fabsf(smoothAngle[i] - currentAngle[i]) < SMOOTHING_SNAP_DEG)
+      currentAngle[i] = smoothAngle[i];
 
     if (currentAngle[i] != before) writeAxis(i, currentAngle[i]);
   }
@@ -589,15 +739,27 @@ static float jointToServo(int joint, double angle) {
 }
 
 // Plan output goes straight to the servo: the plan is already smooth and within the
-// speed limit, so the spike gate, low-pass and speed limit are skipped.
+// speed limit, so the spike gate, low-pass and speed limits are skipped.
 static void writeJoints() {
   for (int j = 0; j < kin::JOINT_COUNT; j++) {
     int axis = JOINT_AXIS[j];
     float angle = jointToServo(j, jointQ[j]);
+    if (angle > currentAngle[axis]) planDir[axis] = 1;
+    else if (angle < currentAngle[axis]) planDir[axis] = -1;
+    resetMotion(axis);
     currentAngle[axis] = angle;
     smoothAngle[axis] = angle;
     targetAngle[axis] = angle;
     writeAxis(axis, angle);
+  }
+}
+
+// The plan has ended. A joint that got there travelling against its APPROACH_DIR
+// goes past the target and back, the same as in stream mode.
+static void startPlanApproach() {
+  for (int j = 0; j < kin::JOINT_COUNT; j++) {
+    int axis = JOINT_AXIS[j];
+    if (APPROACH_DIR[axis] != 0 && planDir[axis] == -APPROACH_DIR[axis]) approaching[axis] = true;
   }
 }
 
@@ -607,7 +769,11 @@ static float slewRemaining() {
   int waiting = 0;
   for (int i = 0; i < AXIS_COUNT; i++) {
     if (pendingAttach[i]) waiting++;
-    float s = fabsf(targetAngle[i] - currentAngle[i]) / MAX_SPEED_DEG_PER_SEC;
+    float distance = fabsf(targetAngle[i] - currentAngle[i]);
+    if (distance == 0.0f) continue;
+    // Cruise time, plus the time lost ramping up and down.
+    float speed = AXIS_MAX_SPEED_DEG_PER_SEC[i];
+    float s = distance / speed + speed / AXIS_MAX_ACCEL_DEG_PER_SEC2[i];
     if (s > seconds) seconds = s;
   }
   return seconds + waiting * (ATTACH_STAGGER_MS / 1000.0f);
@@ -615,7 +781,7 @@ static float slewRemaining() {
 
 static bool axesArrived() {
   for (int i = 0; i < AXIS_COUNT; i++) {
-    if (pendingAttach[i] || !attached[i] || currentAngle[i] != targetAngle[i]) return false;
+    if (pendingAttach[i] || !attached[i] || !atRest(i)) return false;
   }
   return true;
 }
@@ -641,6 +807,7 @@ static void stopMotion() {
   for (int i = 0; i < AXIS_COUNT; i++) {
     targetAngle[i] = currentAngle[i];
     smoothAngle[i] = currentAngle[i];
+    resetMotion(i);
   }
 }
 
@@ -658,9 +825,13 @@ static void serviceMotion(unsigned long now) {
     if (dt < MOTION_PERIOD_MS) return;
     lastPlanMs = now;
     if (dt > MAX_MOTION_DT_MS) dt = MAX_MOTION_DT_MS;   // a stalled loop must not turn into a jump
-    moveElapsed += dt / 1000.0;
-    kin::planAngles(movePlan, moveElapsed, jointLo, jointHi, jointQ);
-    writeJoints();
+    // Once the plan has run out, the joints are left to the anti-backlash approach.
+    if (moveElapsed == 0.0 || moveElapsed < movePlan.duration) {
+      moveElapsed += dt / 1000.0;
+      kin::planAngles(movePlan, moveElapsed, jointLo, jointHi, jointQ);
+      writeJoints();
+      if (moveElapsed >= movePlan.duration) startPlanApproach();
+    }
     if (moveElapsed >= movePlan.duration && axesArrived()) {
       motionState = MOTION_SETTLING;
       settleStartMs = now;
@@ -773,6 +944,7 @@ static void commandMove(long seq, char **f) {
     return;
   }
   moveServo(GRIPPER, (float)grip);
+  for (int j = 0; j < kin::JOINT_COUNT; j++) planDir[JOINT_AXIS[j]] = 0;
   moveElapsed = 0.0;
   lastPlanMs = millis();
   activeSeq = seq;
@@ -980,7 +1152,7 @@ void setup() {
 
   Serial.println("Ready (ESP32+PCA9685, stream + two-way). Stream format: Gripper,WristYaw,WristPitch,ArmB,ArmA,Base,CRC8");
   Serial.println("Arm A -> PCA 1, mirrored on PCA 2 | Base -> ESP32 GPIO");
-  Serial.print("Speed Control: ");
+  Serial.print("Speed Control: stream per axis with acceleration limit; two-way ");
   Serial.print(MAX_SPEED_DEG_PER_SEC);
   Serial.println(" deg/sec");
 }

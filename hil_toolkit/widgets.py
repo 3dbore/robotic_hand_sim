@@ -422,13 +422,12 @@ class ServoRow(QWidget):
         self.sim.setObjectName("Mono")
         self.limits = QLabel("")
         self.limits.setObjectName("Muted")
-        self.inv = None
-        if ch.sim_joint is not None:
-            self.inv = QCheckBox("INV")
-            self.inv.setToolTip("Invert direction of this servo relative to the sim")
-            self.inv.setChecked(ch.sign < 0)
-            if on_invert is not None:
-                self.inv.toggled.connect(lambda checked, c=ch: on_invert(c, checked))
+        self.inv = QCheckBox("INV")
+        self.inv.setToolTip("Swap open and close" if ch.sim_joint is None
+                            else "Invert direction of this servo relative to the sim")
+        self.inv.setChecked(ch.sign < 0)
+        if on_invert is not None:
+            self.inv.toggled.connect(lambda checked, c=ch: on_invert(c, checked))
         self.bar = RangeBar()
 
         top = QHBoxLayout()

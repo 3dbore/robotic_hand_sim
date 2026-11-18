@@ -1,39 +1,45 @@
 """
 ELIOS Hardware-in-the-Loop Toolkit
 -----------------------------------
-Entry point. Runs the arm simulation (arm-sim-end.py) and drives the real arm
-over serial, in one of two ways chosen by the Two-way switch:
-    Stream (off)  every pose is sent as servo angles, 20 times a second
-                  (slave_code/6-axis-esp32, or slave_code/6-axis on the Uno)
-    Two-way (on)  one coordinate at a time; the board solves the joints, moves,
-                  and answers when it has finished (slave_code/6-axis-esp32-twoway)
+Drives the real arm (slave_code/6-axis-esp32-twoway-tmc2208, stream mode)
+from the arm simulation (arm-sim-end.py), with three ways to move it:
+    Joints        every axis on its own slider / jog buttons (no kinematics)
+    Go to point   click in the top or side workspace view (or type X/Y/Z)
+                  and the end effector moves there (analytic IK)
+    Serial log    raw lines from the board
 
-The implementation lives in hil_toolkit/, split by concern so each piece can
-be read (and changed) on its own:
-    paths.py               filesystem locations
-    theme.py               design tokens & Qt stylesheets
-    sim_loader.py          loads arm-sim-end.py as a library (no GUI window)
-    hardware_mapping.py    sim -> servo mapping, effective joint limits
-    calibration_camera.py  simulated-camera correspondence generator
-    serial_link.py         pyserial line protocol wrapper
-    gcode.py               G-code interpreter + timed runner
-    waypoint.py            two-way mode: coordinate steps + reply handling
-    widgets.py             small reusable Qt/VTK widgets
-    dialogs.py             joint-graph and calibration dialogs
-    main_window.py         the main application window
-    app.py                 QApplication wiring / entry point
+The servo telemetry strip at the bottom shows, for every axis, the angle sent
+(▼) and the angle the board reports driving (●) against its allowed range,
+plus the health of the serial link (frames/s, rejected frames, I2C errors,
+board resets).
 
-Stream protocol:  "D2,D3,D4,D5,D6,D8,CC\\n"  — degrees, CRC-8 checksum (README)
-    D2 Gripper | D3 Wrist Yaw | D4 Wrist Pitch | D5 Arm B | D6 Arm A (mirrored in firmware) | D8 Base
-An empty field detaches that servo, so every frame always carries all six values.
-The two-way protocol is described at the top of its .ino and in the README.
+Hardware and mapping (servo = home + sim angle, sim start pose = all 0°):
+    Arm Base     NEMA17 stepper (TMC2208)   home 90 (power-up position)  ±90
+    Arm A        MG996R PCA 1 + 2, mirrored home 90                      ±90
+    Arm B        MG996R PCA 3               home 180, moves back to 0
+    Wrist Pitch  MG996R PCA 8               home 0, up to 180
+    Wrist Yaw    MG996R PCA 11              home 90                      ±90
+    Gripper      MG996R PCA 16              open 180, closed 90
+Each axis is also limited by the sim's joint limits. "INV" on a joint sends
+180 - angle for a servo mounted the other way round (saved in
+calibration/hil_settings.json); it never changes the limits.
 
-Sim ↔ servo mapping (Kinematics.xlsx): the startup pose of the sim (all joints 0°)
-and of the hardware (servo "Initial Position") are identical, so each axis is
-mapped purely as a signed offset from its initial position:
-    servo = home + sign * ratio * sim_angle
+Stream protocol:  "F0,F1,F2,F3,F4,F5,CC\\n"   at 9600 baud, 20 frames/s
+    F0 Gripper | F1 Wrist Yaw | F2 Wrist Pitch | F3 Arm B | F4 Arm A | F5 Base
+An empty field releases that servo; CC = CRC-8 (poly 0x07) of the payload.
+
+Code lives in hil/:
+    config.py       hardware table, limits, settings file
+    sim.py          loads arm-sim-end.py as a library (no window)
+    kinematics.py   FK, analytic IK, reachable workspace
+    motion.py       synchronised, speed-limited joint moves
+    link.py         serial link, frame format, STAT parsing
+    scene.py        3D view
+    widgets.py      joint rows, workspace views, telemetry cards
+    main_window.py  the window
+    app.py          entry point
 """
-from hil_toolkit.app import main
+from hil.app import main
 
 if __name__ == "__main__":
     main()

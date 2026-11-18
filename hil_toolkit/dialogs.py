@@ -207,13 +207,18 @@ class AxisOffsetDialog(QDialog):
         """Why jogging is unavailable right now, or None."""
         gui = self.gui
         if not (gui.link.is_open() and gui.board_ready):
-            return "Connect to the board, then enable Stream to Arm to jog."
-        if gui.twoway_switch.isChecked():
-            return "Offsets are jogged in stream mode. Turn Two-way off, then enable Stream to Arm."
-        if not gui.streaming:
-            return "Enable Stream to Arm to jog."
+            return "Connect to the board, then enable Stream to Arm or Two-way to jog."
         if gui.gcode_runner is not None:
             return "A G-code program is loaded. Press Reset on it to jog."
+        if gui.twoway_switch.isChecked():
+            if not gui.tw_ready:
+                return "Waiting for two-way mode to finish its setup."
+            if not self.at_initial_pose(gui):
+                return ("In two-way mode each offset change homes the arm. "
+                        "Press Go to Initial Pose first.")
+            return None
+        if not gui.streaming:
+            return "Enable Stream to Arm or Two-way to jog."
         return None
 
     @staticmethod
@@ -280,7 +285,7 @@ class AxisOffsetDialog(QDialog):
             row["plus"].setEnabled(blocked is None)
             row["offset"].setText(f"{ch.offset:+.1f}°")
             row["new_home"].setText(f"{ch.effective_home:.1f}°")
-            row["sent"].setText(f"{cmd:.1f}°" if gui.streaming else "–")
+            row["sent"].setText(f"{cmd:.1f}°" if gui.streaming or gui.tw_ready else "–")
             has_out = out is not None and i < len(out)
             row["output"].setText("–" if not has_out else "off" if out[i] is None else f"{out[i]:.1f}°")
 

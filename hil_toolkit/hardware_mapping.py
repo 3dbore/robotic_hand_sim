@@ -50,7 +50,8 @@ class ServoChannel:
             no limit of its own and shifts the whole operating range with it.
     sign  : +1 when increasing servo angle turns the joint the same way as the
             sim's positive (CCW) rotation. Flip with the INV toggle in the GUI
-            if an axis moves the wrong way during bring-up.
+            if an axis moves the wrong way during bring-up. On the gripper (no sim
+            joint) -1 swaps open and close, see grip_raw().
     ratio : servo degrees per joint degree (1.0 = direct drive).
     """
     def __init__(self, name, pin, sim_joint, home, servo_min, servo_max,
@@ -68,7 +69,16 @@ class ServoChannel:
 
     @property
     def effective_home(self):
+        if self.sim_joint is None:
+            return self.grip_raw(self.home)
         return self.home + self.offset
+
+    def grip_raw(self, value):
+        """Gripper only: a control value (servo_min = open, servo_max = closed) as servo
+        degrees, offset included. INV mirrors it inside the range, swapping open and close."""
+        if self.sign < 0:
+            value = self.servo_min + self.servo_max - value
+        return value + self.offset
 
     @property
     def range_min(self):
@@ -112,27 +122,40 @@ class ServoChannel:
         return min(a, b, 0.0), max(a, b, 0.0)
 
 
-# Order == serial field order of 6-axis.ino
+# Order == serial field order of the firmware. Pins are PCA9685 labels (1..16).
+# Ranges are each servo's full travel; the sim's own joint limits narrow them further.
 SERVO_CHANNELS = [
-    ServoChannel("Gripper", "D2", None, home=10, servo_min=10, servo_max=90,
-                 note="Not modelled in sim. 10 = open."),
-    ServoChannel("Wrist Yaw", "D3", 4, home=90, servo_min=0, servo_max=180,
-                 note="Real: 90° CW / 90° CCW from initial."),
-    # sign=-1 verified on hardware: +1 made Pitch− move the real wrist Pitch+.
-    ServoChannel("Wrist Pitch", "D4", 3, home=90, servo_min=0, servo_max=180, sign=-1,
-                 note="Real: 90° CW / 90° CCW from initial."),
-    # Range written 180→0 in the sheet: decreasing servo angle = CW = sim negative.
-    # Full 180° CW is usable from the initial (face-down) position.
-    ServoChannel("Arm B", "D5", 2, home=180, servo_min=0, servo_max=180,
-                 note="Real: 180° CW only from initial."),
-    # sign=-1 verified on hardware: +1 made +Z (driven mostly by J2) move the real arm −Z.
-    ServoChannel("Arm A", "D6/D7", 1, home=90, servo_min=10, servo_max=180, sign=-1,
-                 note="Pin 7 mirrored by firmware (180 - D6)."),
-    # Planetary gear; initial stays at 90. Change `ratio` if the gear is not 1:1.
-    ServoChannel("Arm Base", "D8", 0, home=90, servo_min=0, servo_max=180,
-                 note="Real: 90° CW / 90° CCW from initial."),
+    # Control value servo_min = open, servo_max = closed; sign=-1 mirrors it, so the
+    # servo sits at 180 when open and 90 when closed.
+    ServoChannel("Gripper", "PCA 16", None, home=90, servo_min=90, servo_max=180, sign=-1,
+                 note="Not modelled in sim. Servo 180 = open, 90 = closed."),
+    ServoChannel("Wrist Yaw", "PCA 11", 4, home=90, servo_min=0, servo_max=180,
+                 note="Initial at servo 90."),
+    # home is set at startup to one end of the travel: see PITCH_HOME_CHOICES.
+    ServoChannel("Wrist Pitch", "PCA 8", 3, home=0, servo_min=0, servo_max=180, sign=-1,
+                 note="Initial at servo 0 or 180, chosen at startup."),
+    ServoChannel("Arm B", "PCA 3", 2, home=180, servo_min=0, servo_max=180,
+                 note="Initial at servo 180."),
+    ServoChannel("Arm A", "PCA 1/2", 1, home=90, servo_min=0, servo_max=180, sign=-1,
+                 note="Two servos facing each other; PCA 2 mirrored by firmware (180 - PCA 1)."),
+    # NEMA17 on a TMC2208: no end stops, so its range is the whole wire range and the
+    # sim's joint limit is what bounds it. Step count 0 is servo 90 (BASE_POWERUP_ANGLE).
+    ServoChannel("Arm Base", "Stepper", 0, home=90,
+                 servo_min=PULSE_LIMIT_MIN_DEG, servo_max=PULSE_LIMIT_MAX_DEG,
+                 note="NEMA17 stepper, free rotation. Initial = where it sits at power-up."),
 ]
 GRIPPER = SERVO_CHANNELS[0]
+WRIST_PITCH = SERVO_CHANNELS[2]
+
+# The wrist pitch servo starts at one end of its travel; which end is asked at startup.
+PITCH_HOME_CHOICES = (0, 180)
+
+
+def set_pitch_home(deg):
+    """Sets the wrist pitch's initial servo angle. Call apply_effective_limits() after."""
+    if deg not in PITCH_HOME_CHOICES:
+        raise ValueError(f"pitch home must be one of {PITCH_HOME_CHOICES}")
+    WRIST_PITCH.home = deg
 
 # The sim's own limits (arm-sim-end.py) before hardware limits are applied.
 SIM_BASE_LIMITS = [tuple(l) for l in ase.JOINT_LIMITS]
@@ -218,7 +241,7 @@ def load_axis_directions():
     try:
         with open(AXIS_DIRECTIONS_FILE, encoding="utf-8") as f:
             saved = json.load(f)["signs"]
-        items = [(ch, saved.get(ch.name, ch.sign)) for ch in SERVO_CHANNELS if ch.sim_joint is not None]
+        items = [(ch, saved.get(ch.name, ch.sign)) for ch in SERVO_CHANNELS]
         if not all(v in (1, -1) for _, v in items):
             raise ValueError("sign must be 1 or -1")
     except FileNotFoundError:
@@ -233,7 +256,7 @@ def load_axis_directions():
 
 def save_axis_directions():
     _write_json(AXIS_DIRECTIONS_FILE,
-                {"signs": {ch.name: ch.sign for ch in SERVO_CHANNELS if ch.sim_joint is not None}})
+                {"signs": {ch.name: ch.sign for ch in SERVO_CHANNELS}})
 
 
 def apply_effective_limits():

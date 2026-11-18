@@ -7,7 +7,7 @@ import numpy as np
 import pyvista as pv
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFrame, QTextEdit, QGridLayout,
-                             QPushButton, QComboBox, QSlider, QSizePolicy)
+                             QPushButton, QComboBox, QSlider, QSizePolicy, QMessageBox)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QTextCursor, QTextFormat
 from pyvistaqt import QtInteractor
@@ -21,6 +21,7 @@ from .sim_loader import ase
 from .hardware_mapping import (
     SERVO_CHANNELS, GRIPPER, SERIAL_BAUD, BOARD_RESET_MS, STREAM_INTERVAL_MS,
     apply_effective_limits, load_axis_offsets, load_axis_directions, save_axis_directions,
+    PITCH_HOME_CHOICES, WRIST_PITCH, set_pitch_home,
     format_cmd,
     CAM_ASPECT, CAM_FOV_H, CAM_FOV_V, CAM_FOV_D,
 )
@@ -65,6 +66,10 @@ class HILToolkitGUI(QMainWindow):
         self.last_sent = None
         self.frames_sent = 0
         self.last_sent_at = 0.0
+        # True once the latest line went out twice. The firmware's spike gate wants two
+        # matching frames before a big jump, so a settled line is repeated right away
+        # instead of waiting for the heartbeat.
+        self.last_confirmed = False
         self.gripper_cmd = GRIPPER.home
         self.fw_stat = None         # latest parsed STAT line from the firmware
         self.fw_boot_reason = None
@@ -80,6 +85,7 @@ class HILToolkitGUI(QMainWindow):
         self.board_grip = None
         self.tw_seen_target = None   # the manual target, and when it last changed
         self.tw_seen_at = 0.0
+        self.tw_offsets_pending = False   # offsets changed; twoway_tick re-sends the mapping
         # Before the UI: each ServoRow's INV checkbox reads ch.sign when it is built
         direction_warnings = load_axis_directions()
 
@@ -131,6 +137,7 @@ class HILToolkitGUI(QMainWindow):
         self.calib_dialog = CalibrationDialog(self)
 
         self.log_message("System initialized.", "ok")
+        self.choose_pitch_home()
         for w in direction_warnings + load_axis_offsets() + apply_effective_limits():
             self.log_message(w, "warn")
         self.log_effective_limits()
@@ -442,9 +449,9 @@ class HILToolkitGUI(QMainWindow):
         lay.addWidget(div)
 
         grip_head = QHBoxLayout()
-        grip_head.addWidget(group_label("Gripper · D2"))
+        grip_head.addWidget(group_label(f"Gripper · {GRIPPER.pin}"))
         grip_head.addStretch()
-        self.grip_value = QLabel(f"{GRIPPER.home:03d}°")
+        self.grip_value = QLabel(f"{GRIPPER.effective_home:03.0f}°")
         self.grip_value.setObjectName("MetricSmall")
         grip_head.addWidget(self.grip_value)
         lay.addLayout(grip_head)
@@ -587,6 +594,7 @@ class HILToolkitGUI(QMainWindow):
         except Exception as e:
             self.disconnect_link(f"Serial write failed: {e}")
             return False
+        self.last_confirmed = (line == self.last_sent)
         self.last_sent = line
         self.last_sent_at = time.monotonic()
         self.frames_sent += 1
@@ -631,6 +639,7 @@ class HILToolkitGUI(QMainWindow):
                 self.btn_stream.setChecked(False)
             self.log_message("Two-way mode: checking the firmware and sending the axis mapping.")
             self.tw_ready = False
+            self.tw_offsets_pending = False   # the setup sends the current offsets
             self.tw_session = TwoWaySession(self.send_line, time.monotonic)
             self.tw_session.request("V", on_done=self.on_twoway_hello, on_fail=self.on_twoway_setup_failed)
         else:
@@ -654,19 +663,27 @@ class HILToolkitGUI(QMainWindow):
             self.leave_twoway(f"Two-way mode off: the board runs firmware {reply.get('fw')}, "
                               f"this toolkit needs {TWOWAY_FIRMWARE_ID}. Reflash 6-axis-esp32-twoway.")
             return
+        self.send_mapping(announce=True)
+
+    def send_mapping(self, announce):
+        """Sends the axis mapping (offsets and INV), then homes: the board needs a new
+        H after any C before it takes moves again."""
         session = self.tw_session        # a failed write can end the mode between these requests
         for fields in waypoint.config_fields():
             session.request("C", fields, on_fail=self.on_twoway_setup_failed)
         grip = GRIPPER.command(GRIPPER.effective_home)
-        session.request("H", format_cmd(grip), on_done=lambda r: self.on_twoway_homed(r, grip),
+        session.request("H", format_cmd(grip), on_done=lambda r: self.on_twoway_homed(r, grip, announce),
                         on_fail=self.on_twoway_setup_failed)
 
-    def on_twoway_homed(self, reply, grip):
+    def on_twoway_homed(self, reply, grip, announce=True):
         self.board_q = tuple(reply["q"])
         self.board_grip = grip
         self.tw_ready = True
         self.tw_attached = True
         self.tw_seen_target = None
+        if not announce:
+            self.update_link_ui()
+            return
         if np.any(np.abs(ase.current_angles) > 0.5) or self.gripper_cmd != GRIPPER.home:
             self.log_message("Two-way mode ready: arm is at the initial position and will now "
                              "travel to the current sim pose.", "warn")
@@ -713,6 +730,11 @@ class HILToolkitGUI(QMainWindow):
         """Sends a manual change (jog, Reset, gripper) as one move, once it has settled."""
         self.tw_session.tick()
         if self.tw_session is None or not self.tw_ready or self.gcode_runner is not None or self.tw_session.busy:
+            return
+        if self.tw_offsets_pending:
+            # One re-map for a whole burst of jogs: they pile up while the last one runs.
+            self.tw_offsets_pending = False
+            self.send_mapping(announce=False)
             return
         pose = waypoint.wire_pose(waypoint.fk(ase.current_angles))
         target = (pose, self.gripper_output())
@@ -785,7 +807,10 @@ class HILToolkitGUI(QMainWindow):
         ch.sign = -1 if checked else 1
         for w in apply_effective_limits():
             self.log_message(w, "warn")
-        self.log_message(f"{ch.name}: direction {'inverted' if checked else 'normal'}.", "warn")
+        if ch is GRIPPER:
+            self.log_message(f"Gripper: open and close {'swapped' if checked else 'normal'}.", "warn")
+        else:
+            self.log_message(f"{ch.name}: direction {'inverted' if checked else 'normal'}.", "warn")
         try:
             save_axis_directions()
         except OSError as e:
@@ -799,24 +824,52 @@ class HILToolkitGUI(QMainWindow):
         self.offset_dialog.raise_()
 
     def on_offsets_changed(self):
-        """An offset moved: the hardware follows on the next sync tick. The sim only
-        moves if the pulse limit now excludes its current pose."""
+        """An offset moved: the hardware follows at once. The sim only moves if the
+        pulse limit now excludes its current pose."""
         before = np.array(ase.current_angles, dtype=float)
         for w in apply_effective_limits():
             self.log_message(w, "warn")
-        # The board's copy of the mapping is now out of date.
-        self.leave_twoway("Two-way mode off: the axis offsets changed. Turn it on again to apply them.", "warn")
+        if self.twoway_switch.isChecked():
+            # The board's copy of the mapping is now out of date.
+            if self.gcode_runner is not None:
+                self.leave_twoway("Two-way mode off: the axis offsets changed while a program was "
+                                  "loaded. Turn it on again to apply them.", "warn")
+            else:
+                self.tw_offsets_pending = True
         if not np.array_equal(before, ase.current_angles):
             ase.update_scene(ase.current_angles)
             self.refresh_views()
+        if self.streaming:
+            # Twice: the firmware ignores a lone change smaller than its hold deadband (jitter).
+            line = ",".join(format_cmd(c) for c in self.compute_commands()[0])
+            self.send_line(line) and self.send_line(line)
 
     def set_gripper(self, value):
         self.gripper_cmd = int(value)
-        self.grip_value.setText(f"{self.gripper_cmd:03d}°")
+        self.grip_value.setText(f"{self.gripper_output():03.0f}°")   # servo degrees, not the slider value
+
+    def choose_pitch_home(self):
+        """Asks which end of its travel the wrist pitch servo starts at. HIL_PITCH_HOME=0
+        or 180 in the environment answers it without asking."""
+        preset = os.environ.get("HIL_PITCH_HOME", "").strip()
+        if preset in {str(d) for d in PITCH_HOME_CHOICES}:
+            deg = int(preset)
+        else:
+            box = QMessageBox(self)
+            box.setWindowTitle("Wrist Pitch Initial Position")
+            box.setIcon(QMessageBox.Question)
+            box.setText("Where does the wrist pitch servo (PCA 8) start?")
+            box.setInformativeText("The real wrist must be at this servo angle in the initial pose.")
+            buttons = {box.addButton(f"Servo {d}°", QMessageBox.AcceptRole): d
+                       for d in PITCH_HOME_CHOICES}
+            box.exec_()
+            deg = buttons.get(box.clickedButton(), WRIST_PITCH.home)
+        set_pitch_home(deg)
+        self.log_message(f"Wrist Pitch initial position: servo {deg}°.", "ok")
 
     def gripper_output(self):
-        """The gripper isn't in the sim, so its offset is applied to the slider value."""
-        return GRIPPER.command(self.gripper_cmd + GRIPPER.offset)
+        """The gripper isn't in the sim, so its INV and offset are applied to the slider value."""
+        return GRIPPER.command(GRIPPER.grip_raw(self.gripper_cmd))
 
     # ── Periodic sync: telemetry + streaming + RX ────────────────────────────
     def compute_commands(self):
@@ -860,7 +913,8 @@ class HILToolkitGUI(QMainWindow):
             if self.streaming:
                 now = time.monotonic()
                 line = ",".join(format_cmd(c) for c in cmds)
-                if line != self.last_sent or now - self.last_sent_at >= HEARTBEAT_S:
+                if (line != self.last_sent or not self.last_confirmed
+                            or now - self.last_sent_at >= HEARTBEAT_S):
                     self.send_line(line)
                 if (self.fw_stat is None and not self.stat_missing_warned
                         and now - self.stream_started_at >= STAT_MISSING_WARN_S):

@@ -124,7 +124,9 @@ machine in `calibration/axis_offsets.json` and loaded at startup.
 
 **Reversing an axis:** tick *INV* on its row in *Servo Telemetry*. The choice saves
 immediately to `calibration/axis_directions.json`, per machine, and is restored at
-startup. Delete that file to go back to the defaults.
+startup. Delete that file to go back to the defaults. On the *Gripper* row, *INV*
+swaps open and close: the slider, *Open*/*Close* and G-code `M3`/`M5` keep their
+meaning, and the servo angle is mirrored inside 10–90°.
 
 An offset has no limit and moves the axis's whole operating range with it: a joint
 that runs ±90° from a home of 90° runs ±90° from 95° after a +5° offset, so it sends
@@ -155,7 +157,9 @@ the servos holding; *Stream to Arm* then carries on from that pose. While it is 
 - Jogging sends a coordinate once the controls have been still for a moment.
   Jogging is blocked while a program is loaded; press *Reset* first.
 - *Pause* takes effect when the current move has finished. *Reset* stops the arm where it is.
-- Axis offsets can only be jogged in stream mode.
+- Axis offsets can be jogged from the initial pose. Each change re-sends the mapping
+  and homes the arm (one re-home covers a burst of clicks), so it is slower than in
+  stream mode.
 - If the board refuses a step, the program stops and shows why. If it reboots or stops
   answering, two-way mode turns off.
 
