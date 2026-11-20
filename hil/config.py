@@ -33,6 +33,16 @@ SETTINGS_FILE = os.path.join(PROJECT_ROOT, "calibration", "hil_settings.json")
 BRAND_FONT_FILE = os.path.join(PROJECT_ROOT, "fonts", "ZenDots-Regular.ttf")
 APP_ICON_FILE = os.path.join(PROJECT_ROOT, "paper", "img", "ELIO_ICON.png")
 
+# Hand camera: MaixCam2 + mount, rides on Arm A (base turn + Arm A tilt about J2).
+# hand_cam.stl is arms/HandKinematics-Part.step exported as-is (FreeCAD), so it
+# is in the STEP's frame: sim X/Y/Z = STEP Y/Z/X, then its datum sits at
+# CAM_PART_POS. Lens and positions are sim world mm at the home pose.
+CAM_PART_FILE = os.path.join(PROJECT_ROOT, "arms", "hand_cam.stl")
+CAM_PART_ROT = ((0, 1, 0), (0, 0, 1), (1, 0, 0))
+CAM_PART_POS = (0.0, 35.32, 82.12)
+CAM_LENS_POS = (-52.0, -5.1, 137.2)
+CAM_VIEW_DIR = (0.0, -1.0, 0.0)     # looks along -Y, up = +Z
+
 SERIAL_BAUD = 9600
 TICK_MS = 50                 # motion update + one stream frame (20 Hz)
 RELEASE_EVERY_TICKS = 4      # while motors are off, a release frame every 200 ms
@@ -47,7 +57,7 @@ Z_FLOOR_MM = 0.0
 
 # The tank behind the base: anything of the arm past the base's ±90° (world
 # Y > 0) has to be at least this high.
-TANK_Z_MM = 167.0
+TANK_Z_MM = 150.0
 
 # Furthest angle sent to a servo. Measured on Arm B: 195 (~2670 us) holds,
 # 196 makes the MG996R go limp. Must stay inside the firmware's

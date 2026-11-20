@@ -203,7 +203,16 @@ class Timeline(QWidget):
         p.setPen(fg)
         p.setFont(bold)
         inner = r.adjusted(8, 6, -6, -6)
-        name = p.fontMetrics().elidedText(f"{i + 1}  {s.name}", Qt.ElideRight, int(inner.width()))
+        tag = getattr(s, "tag", None)
+        badge = "◉" + ",".join(str(t["id"]) for t in tag.get("tags", [])) if tag else ""
+        badge_w = 0
+        if badge:                              # step carries an AprilTag capture
+            p.setFont(small)
+            badge_w = p.fontMetrics().horizontalAdvance(badge) + 4
+            p.drawText(inner, Qt.AlignRight | Qt.AlignTop, badge)
+            p.setFont(bold)
+        name = p.fontMetrics().elidedText(f"{i + 1}  {s.name}", Qt.ElideRight,
+                                          int(inner.width() - badge_w))
         p.drawText(inner, Qt.AlignLeft | Qt.AlignTop, name)
         p.setFont(small)
         p.drawText(inner, Qt.AlignLeft | Qt.AlignBottom,

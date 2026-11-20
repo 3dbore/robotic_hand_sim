@@ -882,7 +882,7 @@ class MainWindow(QMainWindow):
         if q is None:
             return
         c = sequence.Sequence(sequence.unique_name(q.name + " copy", self._names()),
-                              [sequence.Step(s.name, list(s.servo), s.hold) for s in q.steps])
+                              [s.copy() for s in q.steps])
         self.seqs.insert(self.seqs.index(q) + 1, c)
         self._save_seqs()
         self._refresh_seq_lists(select=c)
@@ -925,7 +925,7 @@ class MainWindow(QMainWindow):
         if q:
             s = q.steps[i]
             name = sequence.unique_name(s.name, {x.name for x in q.steps})
-            q.steps.insert(i + 1, sequence.Step(name, list(s.servo), s.hold))
+            q.steps.insert(i + 1, s.copy(name))
             self._seq_edited(select_step=i + 1)
 
     def _step_remove(self):

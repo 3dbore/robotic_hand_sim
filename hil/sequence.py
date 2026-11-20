@@ -10,12 +10,17 @@ change what a saved sequence means.
 Every move between steps still goes through MainWindow._request(), so the
 tank-aware planner can refuse a step; the run then stops there.
 
+A step may also carry `tag`: what the gripper camera saw when the step was
+saved (AprilTag ids and image positions plus the camera's azimuth / elevation;
+see arm-hil-toolkit-2.py). Steps without a tag simply have tag = None.
+
 Saved to calibration/hil_sequences.json, rewritten on every edit.
 """
+import copy
 import json
 import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 from .config import AXES, PROJECT_ROOT
 
@@ -28,17 +33,26 @@ class Step:
     name: str
     servo: List[float]          # six servo angles, config.AXES order
     hold: float = 0.5           # seconds to wait at this pose
+    tag: Optional[dict] = None  # AprilTag capture taken at this pose, if any
 
     def to_json(self):
-        return {"name": self.name, "hold": round(self.hold, 2),
-                "servo": {a.name: round(float(v), 2) for a, v in zip(AXES, self.servo)}}
+        d = {"name": self.name, "hold": round(self.hold, 2),
+             "servo": {a.name: round(float(v), 2) for a, v in zip(AXES, self.servo)}}
+        if self.tag:
+            d["tag"] = self.tag
+        return d
+
+    def copy(self, name=None):
+        return Step(self.name if name is None else name, list(self.servo), self.hold,
+                    copy.deepcopy(self.tag))
 
     @classmethod
     def from_json(cls, d):
         s = d.get("servo", {})
         servo = [float(s.get(a.name, a.home)) for a in AXES]
         hold = max(0.0, min(HOLD_MAX_S, float(d.get("hold", 0.5))))
-        return cls(str(d.get("name", "Step")), servo, hold)
+        tag = d.get("tag")
+        return cls(str(d.get("name", "Step")), servo, hold, tag if isinstance(tag, dict) else None)
 
 
 @dataclass

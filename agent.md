@@ -77,7 +77,7 @@ Limits always live in servo or sim space: each limit is the sim limit intersecte
 
 ### Tank keep-out (safety)
 
-- A tank sits behind the base. A world point is unsafe when Y > 0 (behind) **and** Z < `TANK_Z_MM` (167 mm).
+- A tank sits behind the base. A world point is unsafe when Y > 0 (behind) **and** Z < `TANK_Z_MM` (150 mm).
 - `kinematics.unsafe()` checks the elbow (J3), the EE (J4) and the wrist (J5). It does not check the gripper tip.
 - `plan(a, b)` returns a safe path, trying these in order:
   1. a direct move;
@@ -129,4 +129,4 @@ The app writes it on every change. **Tests must back it up and restore it**, or 
 
 - Keep changes small and in the existing style: plain functions, dataclasses, and module docstrings that explain the *why*.
 - Don't commit unless asked. The working tree often holds uncommitted work from the user; don't discard it.
-- The user-facing text in the UI is plain and short. Refusals say what would have gone wrong, e.g. "would hit the tank (behind the base, below Z 167 mm)".
+- The user-facing text in the UI is plain and short. Refusals say what would have gone wrong, e.g. "would hit the tank (behind the base, below Z 150 mm)".
