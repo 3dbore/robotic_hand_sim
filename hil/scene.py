@@ -1,6 +1,12 @@
 """3D view of the arm: the sim's meshes posed at the commanded angles, plus
-the end effector and the click-to-move target."""
+the end effector and the click-to-move target.
+
+From the wrist pitch joint (J4) on, the sim's arm4/arm5 meshes are replaced by
+the gripper model in gripper/ (wrist, body, servo and both four-bar jaws).
+"""
+import importlib.util
 import math
+import os
 
 import numpy as np
 import pyvista as pv
@@ -11,6 +17,28 @@ from .sim import ase
 from .theme import C
 
 ARM_COLORS = {name: cfg["color"] for name, cfg in ase.ARM_CONFIG.items()}
+LINK_INDEX = {k: i for i, k in enumerate(ARM_COLORS, start=1)}   # mesh -> its matrix in link_transforms
+REPLACED = ("arm4", "arm5")                                      # pitch link and old gripper
+ARM_LINKS = [k for k in ARM_COLORS if k not in REPLACED]
+
+_spec = importlib.util.spec_from_file_location(
+    "gripper_kinematics",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gripper", "gripper_kinematics.py"))
+gk = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(gk)
+
+# Gripper frame (Y along the gripper, X across, pitch about X through
+# gk.PITCH_PIVOT) -> the arm's frame below J4 at sim angle 0: the pitch axis
+# lies on the arm's X, the pitch pivot sits on J4, and gripper pitch 0 points
+# straight up (+Z). The gripper's pitch is then 90 + J4, so the home pose
+# (J4 = 0) is pitch +90 with the jaws reaching out along -Y like the old arm5.
+J4_PIVOT = np.array(ase.JOINTS[3][1], float)
+PITCH_HOME = 90.0
+G0 = gk.rot((1, 0, 0), 90.0)
+G0[:3, 3] = J4_PIVOT - G0[:3, :3] @ gk.PITCH_PIVOT
+GRIP_COLORS = {"wrist": ARM_COLORS["arm4"], "body": ARM_COLORS["arm5"], "body2": ARM_COLORS["arm5"],
+               "servo": "#3A3A3A", "rod_geared": "#C8C8C8", "rod": "#C8C8C8", "finger": "#E0B040"}
+JAW_PARTS = ("servo", "rod_geared", "rod", "finger")
 
 
 class Scene:
@@ -20,8 +48,14 @@ class Scene:
         p = self.plotter
         p.set_background(C["surface_lowest"])
 
-        self.base_pts = {k: ase.original_points[k].copy() for k in ARM_COLORS}
-        self.meshes = {k: ase.loaded_meshes[k].copy() for k in ARM_COLORS}
+        self.base_pts = {k: ase.original_points[k].copy() for k in ARM_LINKS}
+        self.meshes = {k: ase.loaded_meshes[k].copy() for k in ARM_LINKS}
+        # Gripper parts stay in their STL frames and are posed with user_matrix;
+        # the jaw parts are drawn twice (left, and right = mirrored across X).
+        self.grip_meshes = {k: pv.read(gk.stl_path(k)) for k in gk.PARTS}
+        self.grip = gk.Gripper(self.grip_meshes["finger"].points)
+        self.grip_pct = 100.0
+        self.grip_actors = []          # (actor, part, side) for the main view and the POV view
         self.cam = pv.read(CAM_PART_FILE)
         self.cam_pts = (self.cam.points @ np.array(CAM_PART_ROT, float).T + CAM_PART_POS).astype(np.float32)
         self.cam.points = self.cam_pts.copy()
@@ -41,6 +75,7 @@ class Scene:
         shading = dict(smooth_shading=True, specular=0.4, specular_power=20)
         for k, m in self.meshes.items():
             p.add_mesh(m, color=ARM_COLORS[k], **shading)
+        self._add_gripper(p, shading)
         p.add_mesh(self.cam, color="#A0A0A0", **shading)
 
         self.ee = pv.Sphere(radius=8, center=(0, 0, 0))
@@ -57,16 +92,42 @@ class Scene:
             pass
         p.camera_position = [(520, -620, 420), (0, -60, 120), (0, 0, 1)]
 
+    def _add_gripper(self, p, shading):
+        for k, m in self.grip_meshes.items():
+            for side in (("L", "R") if k in JAW_PARTS else ("",)):
+                self.grip_actors.append((p.add_mesh(m, color=GRIP_COLORS[k], **shading), k, side))
+
+    def _pose_gripper(self, M, angles):
+        """Wrist pitch = 90 + J4, yaw = -J5 (gripper yaw turns about its own
+        long axis, which points along -Y at home), jaws from self.grip_pct."""
+        Mp, My = gk.wrist_matrices(PITCH_HOME + angles[3], -angles[4])
+        G = M[3] @ G0
+        Gp, Gy = G @ Mp, G @ My
+        servo = self.grip.servo_for_percent(min(max(self.grip_pct, 0.0), 100.0))
+        jaw = gk.part_matrices(gk.solve_jaw(servo))
+        mats = {"wrist": Gp @ gk.placement("wrist"), "body": Gy @ gk.placement("body"),
+                "body2": Gy @ gk.placement("body2")}
+        for k in JAW_PARTS:
+            mats[k + "L"] = Gy @ jaw[k]
+            mats[k + "R"] = Gy @ gk.MIRROR_X @ jaw[k]
+        for actor, k, side in self.grip_actors:
+            actor.user_matrix = mats[k + side]
+
     def _set_target_visible(self, on):
         try:
             self.target_actor.SetVisibility(bool(on))
         except AttributeError:
             pass
 
-    def pose(self, angles, ee):
+    def pose(self, angles, ee, grip_pct=None):
+        """grip_pct: jaw opening, 0 = closed .. 100 = fully open (None keeps the last)."""
+        if grip_pct is not None:
+            self.grip_pct = float(grip_pct)
         M = ase.link_transforms(angles)
-        for i, k in enumerate(ARM_COLORS, start=1):
-            self.meshes[k].points[:] = ase.apply_transform_to_points(self.base_pts[k], M[i])
+        self._last = (M, list(angles))
+        for k in ARM_LINKS:
+            self.meshes[k].points[:] = ase.apply_transform_to_points(self.base_pts[k], M[LINK_INDEX[k]])
+        self._pose_gripper(M, angles)
         self.cam.points[:] = ase.apply_transform_to_points(self.cam_pts, M[2])
         self.lens = ase.apply_transform_to_points(self.lens_home, M[2])
         self.ee.points[:] = self.ee_pts + np.asarray(ee, np.float32)
@@ -82,6 +143,9 @@ class Scene:
             self._pov.add_mesh(self.floor, style="wireframe", color=C["surface_dim"], line_width=1)
             for k, m in self.meshes.items():
                 self._pov.add_mesh(m, color=ARM_COLORS[k], smooth_shading=True, specular=0.4, specular_power=20)
+            self._add_gripper(self._pov, dict(smooth_shading=True, specular=0.4, specular_power=20))
+            if getattr(self, "_last", None) is not None:
+                self._pose_gripper(*self._last)
         p = self._pov
         p.window_size = (w, h)
         pos, focal, up = self.lens

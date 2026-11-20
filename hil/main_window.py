@@ -656,7 +656,7 @@ class MainWindow(QMainWindow):
     def _show_pose(self):
         sim = self.motion.sim_cmd()
         ee = kinematics.fk(sim)
-        self.scene.pose(sim, ee)
+        self.scene.pose(sim, ee, config.grip_percent(self.motion.cmd[AXES.index(GRIPPER)]))
         for i, row in self.rows.items():
             row.show_cmd(self.motion.cmd[i])
         pitch = sim[1] + sim[2] + sim[3]
