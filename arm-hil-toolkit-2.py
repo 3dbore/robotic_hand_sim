@@ -21,15 +21,17 @@ Disconnect (or closing the window) kills the script, which frees the camera.
 
 AprilTags in sequences: frames are searched for tag36h11 tags on the PC and
 each tag's centre gets a dot. In the Sequences tab, with "Tag on save" on,
-"+ Add current pose" / "Update" also store what the camera sees (if a tag is
-in view) in that step: each tag's pixel position, its offset from the image
-centre, and its direction. The camera rides on Arm A, so
-    camera azimuth   = Arm Base joint angle (0 = home, sim degrees)
-    camera elevation = Arm A joint angle    (0 = home, sim degrees)
-    tag azimuth      = camera azimuth   + AZ_SIGN * horizontal angle off centre
-    tag elevation    = camera elevation + EL_SIGN * vertical angle off centre
-Angles off centre come from CAM_HFOV_DEG (pinhole model). Steps with no tag
-in view are saved without one. "Capture tag" / "Clear tag" edit a step's tag.
+"+ Add current pose" / "Update" also store, if a tag is in view, only where
+the tag's centre sits along the horizontal axis: its offset from the camera's
+vertical centre line (pixels, normalised and degrees; the tag nearest that
+line if there are several). Steps with no tag in view are saved without one.
+"Capture tag" / "Clear tag" edit a step's tag.
+
+Playing a step that has a tag: once the arm arrives, Arm Base alone steers the
+live tag until its centre is back on the saved vertical line (tag left of the
+line -> base turns left, right -> right), then the step's hold starts. If the
+tag never shows up it carries on after ALIGN_WAIT_S. The angles come from
+CAM_HFOV_DEG (pinhole model); AZ_SIGN flips the turn direction.
 Only one program can hold the camera: stop camera_capture.py / MaixVision
 runs first.
 
@@ -131,13 +133,18 @@ CMD_TIMEOUT_S = 6                      # every SSH step gives up after this
 # placeholder: measure it (or calibrate) and set it here. Raw pixels are saved
 # too, so captures can be re-derived later with a better value.
 CAM_HFOV_DEG = 60.0
-# How image offsets add to the camera angles. +1: a tag right of centre has a
-# larger azimuth, one above centre a larger elevation. Flip a sign if the
-# Arm Base / Arm A joint directions turn out the other way round.
+# +1: turning Arm Base to larger angles pans the camera to the right (a tag
+# right of the target line is followed by turning right). Flip it if the base
+# turns the wrong way round.
 AZ_SIGN = +1.0
-EL_SIGN = +1.0
 TAG_MAX_AGE_S = 1.0                    # detection must be at most this old
 TAG_SETTLE_S = 0.4                     # ...and taken this long after the arm stopped
+# Centring during playback (Arm Base steers the tag onto its saved line)
+ALIGN_TOL_DEG = 1.0                    # close enough
+ALIGN_GAIN = 0.8                       # fraction of the error corrected per move
+ALIGN_MAX_STEP_DEG = 10.0              # biggest single base correction
+ALIGN_MAX_MOVES = 8
+ALIGN_WAIT_S = 4.0                     # give up when no usable frame / tag for this long
 
 
 def tag_center(corners):
@@ -177,47 +184,50 @@ def annotate_tags(jpeg, detector):
     return QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy(), found
 
 
-def tag_record(found, size, servo):
-    """What gets saved in a sequence step: the tags seen at servo pose `servo`
-    (six servo angles, config.AXES order) in an image of `size` (w, h)."""
-    base, arm_a = config.AXIS_BY_NAME["Arm Base"], config.AXIS_BY_NAME["Arm A"]
-    base_servo = float(servo[config.AXES.index(base)])
-    arm_a_servo = float(servo[config.AXES.index(arm_a)])
-    cam_az, cam_el = base.to_sim(base_servo), arm_a.to_sim(arm_a_servo)
-    w, h = size
+def h_angle(u, w):
+    """Horizontal angle (deg) of image column u off the vertical centre line;
+    positive = right of it (pinhole model, CAM_HFOV_DEG)."""
     f = (w / 2.0) / math.tan(math.radians(CAM_HFOV_DEG) / 2.0)    # focal length, px
-    tags = []
-    for t in sorted(found, key=lambda t: t["id"]):
-        u, v = t["center"]
-        dx, dy = u - w / 2.0, h / 2.0 - v            # right / up of centre, px
-        h_deg, v_deg = math.degrees(math.atan2(dx, f)), math.degrees(math.atan2(dy, f))
-        cs = np.asarray(t["corners"])
-        tags.append({
-            "id": int(t["id"]),
-            "px": [round(u, 1), round(v, 1)],
-            "offset_px": [round(dx, 1), round(dy, 1)],
-            "offset_norm": [round(dx / (w / 2.0), 4), round(dy / (h / 2.0), 4)],
-            "offset_deg": [round(h_deg, 2), round(v_deg, 2)],
-            "azimuth_deg": round(cam_az + AZ_SIGN * h_deg, 2),
-            "elevation_deg": round(cam_el + EL_SIGN * v_deg, 2),
-            "size_px": round(float(np.mean(np.linalg.norm(cs - np.roll(cs, 1, axis=0), axis=1))), 1),
-        })
+    return math.degrees(math.atan2(u - w / 2.0, f))
+
+
+def tag_record(found, size, servo):
+    """What gets saved in a sequence step: only where the tag's centre sits
+    along the horizontal axis, i.e. its offset from the camera's vertical centre
+    line. With several tags in view, the one closest to that line is kept.
+    `servo` (six servo angles) is only stored for reference."""
+    base = config.AXIS_BY_NAME["Arm Base"]
+    base_servo = float(servo[config.AXES.index(base)])
+    w, h = size
+    t = min(found, key=lambda t: abs(t["center"][0] - w / 2.0))
+    u = t["center"][0]
+    dx = u - w / 2.0
     return {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "image": [int(w), int(h)],
         "hfov_deg": CAM_HFOV_DEG,
-        "camera": {"azimuth_deg": round(cam_az, 2), "elevation_deg": round(cam_el, 2),
-                   "base_servo": round(base_servo, 2), "arm_a_servo": round(arm_a_servo, 2)},
-        "tags": tags,
+        "camera": {"azimuth_deg": round(base.to_sim(base_servo), 2), "base_servo": round(base_servo, 2)},
+        "tags": [{
+            "id": int(t["id"]),
+            "x_px": round(u, 1),
+            "offset_px": round(dx, 1),                       # + right of the centre line
+            "offset_norm": round(dx / (w / 2.0), 4),
+            "offset_deg": round(h_angle(u, w), 2),
+        }],
     }
 
 
+def saved_offset_deg(t):
+    """Saved horizontal offset (deg) of a stored tag; also reads the old
+    format where offset_deg was [horizontal, vertical]."""
+    v = t["offset_deg"]
+    return float(v[0] if isinstance(v, (list, tuple)) else v)
+
+
 def describe_tag(tag):
-    cam = tag.get("camera", {})
-    parts = [f"id{t['id']} at ({t['px'][0]:.0f}, {t['px'][1]:.0f}) px  "
-             f"az {t['azimuth_deg']:.1f}°  el {t['elevation_deg']:.1f}°" for t in tag.get("tags", [])]
-    return (f"Tag  camera az {cam.get('azimuth_deg', 0):.1f}°  el {cam.get('elevation_deg', 0):.1f}°   "
-            + ("   ".join(parts) or "no tags"))
+    parts = [f"id{t['id']} centre {saved_offset_deg(t):+.1f}° off the vertical line "
+             f"({t.get('x_px', t['px'][0] if 'px' in t else 0):.0f} px)" for t in tag.get("tags", [])]
+    return "Tag  " + ("   ".join(parts) or "no tags")
 
 
 class CameraClient(QThread):
@@ -933,6 +943,57 @@ class CameraViewMixin:
             return False, "no AprilTag in view"
         step.tag = tag_record(found, size, servo)
         return True, describe_tag(step.tag)
+
+    def _run_tick(self):
+        """Before a step's hold starts, centre its saved tag with Arm Base."""
+        r = self.run
+        q = r["seq"]
+        s = q.steps[r["idx"]] if r["idx"] < len(q.steps) else None
+        if s is not None and s.tag and s.tag.get("tags") and not self._align_done(r, s):
+            return
+        super()._run_tick()
+
+    def _align_done(self, r, s):
+        """One tick of the centring loop. True when finished (or given up)."""
+        st = r.get("align")
+        if st is None or st["idx"] != r["idx"]:
+            st = r["align"] = {"idx": r["idx"], "moves": 0, "deadline": time.monotonic() + ALIGN_WAIT_S}
+        if st.get("done"):
+            return True
+        saved = s.tag["tags"][0]
+        snap = self.camera.tag_snapshot(getattr(self, "_still_since", 0.0) + TAG_SETTLE_S)
+        if isinstance(snap, str):
+            if "not connected" in snap or "detection is off" in snap or time.monotonic() > st["deadline"]:
+                return self._align_end(r, s, st, f"not centred: {snap}")
+            return False
+        (w, _h), found = snap
+        match = next((t for t in found if t["id"] == saved["id"]), None)
+        if match is None:
+            if time.monotonic() > st["deadline"]:
+                return self._align_end(r, s, st, f"not centred: tag {saved['id']} not in view")
+            return False
+        err = AZ_SIGN * (h_angle(match["center"][0], w) - saved_offset_deg(saved))   # + = tag too far right
+        if abs(err) <= ALIGN_TOL_DEG:
+            return self._align_end(r, s, st, f"tag {saved['id']} centred ({err:+.1f}°)")
+        if st["moves"] >= ALIGN_MAX_MOVES:
+            return self._align_end(r, s, st, f"gave up centring, {err:+.1f}° off")
+        step = max(-ALIGN_MAX_STEP_DEG, min(ALIGN_MAX_STEP_DEG, ALIGN_GAIN * err))
+        goal = self.motion.final_goal.copy()
+        goal[AXES_IDX["Arm Base"]] += step                  # tag right -> turn right, left -> left
+        why = self._request(goal)
+        if why:
+            return self._align_end(r, s, st, f"not centred: {why}")
+        st["moves"] += 1
+        st["deadline"] = time.monotonic() + ALIGN_WAIT_S
+        self._goal_changed()
+        self._run_msg(f"Step {r['idx'] + 1} “{s.name}”: centring tag {saved['id']}, "
+                      f"{err:+.1f}° {'right' if err > 0 else 'left'} of its line")
+        return False
+
+    def _align_end(self, r, s, st, note):
+        st["done"] = True
+        self._run_msg(f"Step {r['idx'] + 1} “{s.name}”: {note}")
+        return True
 
     def _step_add(self):
         super()._step_add()
