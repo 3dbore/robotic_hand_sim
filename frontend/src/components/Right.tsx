@@ -2,13 +2,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { CircleX, House, Plug, RefreshCw, TriangleAlert } from "lucide-react";
 import { api } from "../api";
-import { goHome, stopAll } from "../state";
+import { goHome, setPrefs, stopAll, usePrefs } from "../state";
 import type { TelemetryState } from "../types";
 import { Dot, Tabs, fmt } from "../ui";
 import { SimPov } from "./View3D";
 
 export function CameraFeeds({ s }: { s: TelemetryState }) {
   const c = s.camera;
+  const prefs = usePrefs();
   return (
     <>
       <div className="feed">
@@ -36,6 +37,11 @@ export function CameraFeeds({ s }: { s: TelemetryState }) {
         <span className="pill">Simulated Camera POV</span>
         <span className="live chip"><Dot tone="ok" />Live</span>
         <span className="meta">sim 512x320 · HFOV 60°</span>
+        <label className="hud meta">
+          Targeting HUD
+          <input type="range" min={0} max={1} step={0.05} value={prefs.guideOpacity} aria-label="Targeting HUD opacity"
+            onChange={(e) => setPrefs({ guideOpacity: +e.target.value })} />
+        </label>
       </div>
     </>
   );

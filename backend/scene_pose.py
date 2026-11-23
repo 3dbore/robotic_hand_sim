@@ -61,7 +61,11 @@ def pose(sim5, grip_pct):
     Mp, My = gk.wrist_matrices(PITCH_HOME + sim5[3], -sim5[4])
     G = M[3] @ G0
     Gp, Gy = G @ Mp, G @ My
-    jaw = gk.part_matrices(gk.solve_jaw(_grip.servo_for_percent(min(max(grip_pct, 0.0), 100.0))))
+    solved = gk.solve_jaw(_grip.servo_for_percent(min(max(grip_pct, 0.0), 100.0)))
+    jaw = gk.part_matrices(solved)
+    T = np.eye(4)                              # fingertip centre, on the gripper's X = 0 plane
+    T[1:3, 3] = _grip.tip(solved)[1:3]
+    grip = {"mat": np.round((Gy @ T).T.ravel(), 4).tolist(), "gap": round(max(_grip.gap(solved), 0.1), 2)}
     mats.update({"wrist": Gp @ gk.placement("wrist"), "body": Gy @ gk.placement("body"),
                  "body2": Gy @ gk.placement("body2")})
     for k in JAW_PARTS:
@@ -70,7 +74,7 @@ def pose(sim5, grip_pct):
     mats["cam"] = M[2] @ CAM_FIX
     lens = ase.apply_transform_to_points(LENS_HOME, M[2])
     return {"mats": {k: np.round(m.T.ravel(), 4).tolist() for k, m in mats.items()},
-            "lens": np.round(lens, 2).tolist()}
+            "lens": np.round(lens, 2).tolist(), "grip": grip}
 
 
 # ── workspace masks for the 2D views, as in MainWindow._refresh_masks ──

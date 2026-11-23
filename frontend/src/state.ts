@@ -28,9 +28,11 @@ export interface Prefs {
   releaseOnEsc: boolean;
   autoReconnect: boolean;
   tagOnSave: boolean;
+  /** opacity of the gripper targeting line and grip box, 0..1 */
+  guideOpacity: number;
 }
 
-const DEFAULTS: Prefs = { jog: 2, showWorkspace: true, showTarget: true, mirrorBoard: false, releaseOnEsc: true, autoReconnect: true, tagOnSave: true };
+const DEFAULTS: Prefs = { jog: 2, showWorkspace: true, showTarget: true, mirrorBoard: false, releaseOnEsc: true, autoReconnect: true, tagOnSave: true, guideOpacity: 0.5 };
 const KEY = "elios-hil-prefs";
 
 function load(): Prefs {

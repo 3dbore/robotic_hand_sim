@@ -71,6 +71,8 @@ export interface SequenceData {
 export interface Pose {
   mats: Record<string, number[]>;
   lens: number[][];
+  /** fingertip centre matrix (column-major) and the jaw gap in mm */
+  grip: { mat: number[]; gap: number };
 }
 
 export interface TelemetryState {

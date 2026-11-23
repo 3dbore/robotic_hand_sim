@@ -684,6 +684,8 @@ class CameraView(QWidget):
         self.img = None
         self.info = ""
         self.target = None             # (offset deg, label): where the step's tag should sit
+        self.hud = None                # Scene.hud_points(): the targeting line, grip box and dots
+        self.hud_opacity = 0.5
         self.placeholder = "Type the MaixCam IP and press Connect"
         self.setMinimumSize(120, 75)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -698,6 +700,43 @@ class CameraView(QWidget):
             self.placeholder = placeholder
         self.update()
 
+    def _paint_hud(self, p, x, y, w, h):
+        """Targeting HUD over the image: the aim line, the grip box (as wide as the
+        jaw gap), a dot on each fingertip and a marker where an object is gripped."""
+        pt = lambda q: QPointF(x + (q[0] + 1) * w / 2, y + (q[1] + 1) * h / 2)
+        red = QColor(C["error"])
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setOpacity(self.hud_opacity)
+        z = self.hud["zone"]
+        faces = [[0, 1, 3, 2], [4, 5, 7, 6]]                  # tip face, back face
+        if all(q is not None for q in z):
+            p.setPen(QPen(red, 1.5))
+            fill = QColor(red)
+            fill.setAlphaF(0.35)
+            p.setBrush(fill)
+            for face in faces:
+                p.drawPolygon(QPolygonF([pt(z[i]) for i in face]))
+            p.setBrush(Qt.NoBrush)
+            for i in range(4):
+                p.drawLine(pt(z[faces[0][i]]), pt(z[faces[1][i]]))
+        a = self.hud["aim"]
+        if all(q is not None for q in a):
+            p.setPen(QPen(red, 2))
+            p.drawLine(pt(a[0]), pt(a[1]))
+        p.setPen(Qt.NoPen)
+        p.setBrush(red)
+        for q in self.hud["tips"]:
+            if q is not None:
+                p.drawEllipse(pt(q), 3.5, 3.5)
+        c = self.hud["centre"]
+        if c is not None:                                     # ring marker at the grip point
+            p.setPen(QPen(QColor("#ffffff"), 1.5))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(pt(c), 7, 7)
+            p.drawPoint(pt(c))
+        p.restore()
+
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -710,6 +749,8 @@ class CameraView(QWidget):
         s = self.img.size().scaled(r.size(), Qt.KeepAspectRatio)
         x, y = (r.width() - s.width()) // 2, (r.height() - s.height()) // 2
         p.drawImage(QRectF(x, y, s.width(), s.height()), self.img)
+        if self.hud:
+            self._paint_hud(p, x, y, s.width(), s.height())
         f = QFont(MONO)
         f.setPixelSize(10)
         p.setFont(f)
@@ -888,6 +929,18 @@ class CameraPanel(QFrame):
         orow.addWidget(self.ov_slider, 1)
         orow.addWidget(label("Sim", "Muted"))
         ol.addLayout(orow)
+        # The targeting HUD (aim line + grip box) has its own opacity, apart from the sim blend.
+        hrow = QHBoxLayout()
+        hrow.setSpacing(6)
+        hrow.addWidget(label("HUD", "Muted"))
+        self.hud_slider = QSlider(Qt.Horizontal)
+        self.hud_slider.setRange(0, 100)
+        self.hud_slider.setValue(self.prefs.value("camera/hud", 50, type=int))
+        self.hud_slider.setToolTip("Opacity of the targeting line and grip box (camera views and 3D view)")
+        self.hud_slider.valueChanged.connect(self._on_hud)
+        hrow.addWidget(self.hud_slider, 1)
+        ol.addLayout(hrow)
+        self._on_hud(self.hud_slider.value())
         lay.addWidget(self.body, 1)
 
         self.grip = CornerGrip(self)
@@ -914,7 +967,16 @@ class CameraPanel(QFrame):
         rh, rw = rgb.shape[:2]
         img = QImage(rgb.data, rw, rh, 3 * rw, QImage.Format_RGB888).scaled(w, h)  # squeeze to the frame
         self.sim_view.set_image(img, f"sim  {w}×{h}  FOV {CAM_HFOV_DEG:.0f}°×{CAM_VFOV_DEG:.0f}°")
+        hud = self.scene.hud_points(CAM_HFOV_DEG, CAM_VFOV_DEG)
+        for v in (self.sim_view, self.ov_view):
+            v.hud = hud
         self._compose_overlay()
+
+    def _on_hud(self, v):
+        self.scene.set_guide_opacity(v / 100)       # the 3D view
+        for view in (self.sim_view, self.ov_view):  # the camera views
+            view.hud_opacity = v / 100
+            view.update()
 
     def _compose_overlay(self, *_):
         """Real frame underneath, sim render on top at the slider's opacity."""
@@ -1040,6 +1102,7 @@ class CameraPanel(QFrame):
         self.prefs.setValue("camera/tags", self.tag_btn.isChecked())
         self.prefs.setValue("camera/tab", self.tabs.currentIndex())
         self.prefs.setValue("camera/overlay", self.ov_slider.value())
+        self.prefs.setValue("camera/hud", self.hud_slider.value())
 
     # ── connection ──
     def toggle_connect(self):

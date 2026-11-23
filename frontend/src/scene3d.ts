@@ -43,6 +43,31 @@ scene.add(tank);
 export const eeMarker = overlay(new THREE.Mesh(new THREE.SphereGeometry(8, 20, 14), new THREE.MeshBasicMaterial({ color: 0xff6b35, transparent: true, opacity: 0.85 })));
 export const targetMarker = overlay(new THREE.Mesh(new THREE.SphereGeometry(7, 20, 14), new THREE.MeshBasicMaterial({ color: 0xff0004, transparent: true, opacity: 0.55 })));
 
+/* Gripper targeting guides: a line out of the fingertips and a box as wide as the
+   jaw gap. They live on their own layer so the main view and the camera POV both
+   draw them, with an opacity of their own. */
+const GUIDE = 3;
+const GUIDE_DEPTH = 30, GUIDE_H = 20, GUIDE_LEN = 300; // mm, as hil/scene.py
+const guideLine = new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, GUIDE_LEN, 0)]),
+  new THREE.LineBasicMaterial({ color: 0xff0004, transparent: true }),
+);
+const guideBox = new THREE.Mesh(
+  new THREE.BoxGeometry(1, GUIDE_DEPTH, GUIDE_H).translate(0, -GUIDE_DEPTH / 2, 0), // x is scaled to the gap
+  new THREE.MeshBasicMaterial({ color: 0xff0004, transparent: true, depthWrite: false }),
+);
+for (const o of [guideLine, guideBox]) {
+  o.matrixAutoUpdate = false;
+  o.visible = false; // until the first pose arrives
+  o.layers.set(GUIDE);
+  scene.add(o);
+}
+export function setGuideOpacity(a: number) {
+  guideLine.material.opacity = a;
+  guideBox.material.opacity = a;
+}
+setGuideOpacity(0.5);
+
 let loading: Promise<void> | null = null;
 export function loadParts(): Promise<void> {
   loading ??= (async () => {
@@ -75,6 +100,11 @@ export function applyPose(pose: Pose | undefined) {
     m.visible = true;
   }
   lens = pose.lens;
+  if (pose.grip) {
+    guideLine.matrix.fromArray(pose.grip.mat);
+    guideBox.matrix.fromArray(pose.grip.mat).scale(new THREE.Vector3(pose.grip.gap, 1, 1));
+    guideLine.visible = guideBox.visible = true;
+  }
 }
 
 /** Point the POV camera through the hand camera lens (hil/scene.py camera_pov). */
@@ -89,4 +119,4 @@ export function aimPov(cam: THREE.PerspectiveCamera) {
 export const POV_W = 512;
 export const POV_H = 320;
 export const POV_VFOV = (2 * Math.atan(Math.tan(Math.PI / 6) * (POV_H / POV_W)) * 180) / Math.PI;
-export { OVERLAY };
+export { OVERLAY, GUIDE };

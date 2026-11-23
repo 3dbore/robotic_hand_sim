@@ -189,6 +189,8 @@ svg { flex: none; }
 .viewport .title { position: absolute; top: var(--sp-xl); left: var(--sp-xl); font-weight: 700; font-size: var(--fs-m); }
 .viewport .views { position: absolute; top: var(--sp-lg); right: var(--sp-lg); display: flex; gap: var(--sp-sm); }
 .viewport .views .btn { background: var(--surface-base); }
+.viewport .guideop { position: absolute; top: calc(var(--sp-lg) + 40px); right: var(--sp-lg); display: flex; align-items: center; gap: var(--sp-sm); font-size: var(--fs-s); }
+.viewport .guideop input { width: 96px; }
 .viewport .note { position: absolute; left: var(--sp-xl); bottom: var(--sp-md); font-size: var(--fs-s); }
 .viewport .err { position: absolute; left: 50%; bottom: var(--sp-xl); transform: translateX(-50%); color: var(--bad); font-weight: 700; }
 .basejog { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); display: flex; align-items: flex-end; gap: var(--sp-md); z-index: 2; }
@@ -220,6 +222,8 @@ svg { flex: none; }
 .feed .pill { position: absolute; top: var(--sp-md); left: var(--sp-md); padding: var(--sp-sm) var(--sp-lg); border-radius: var(--r-pill); background: var(--surface-raised); font-weight: 700; }
 .feed .live { position: absolute; top: var(--sp-lg); right: var(--sp-lg); }
 .feed .meta { position: absolute; left: var(--sp-sm); bottom: var(--sp-sm); padding: var(--sp-xs) var(--sp-sm); background: var(--surface-raised); border-radius: var(--r-sm); }
+.feed .hud { left: auto; right: var(--sp-sm); display: flex; align-items: center; gap: var(--sp-sm); font-size: var(--fs-s); }
+.feed .hud input { width: 84px; }
 .feed .off { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: var(--sp-sm); text-align: center; }
 .feed .off b { font-size: var(--fs-l); }
 

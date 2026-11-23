@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { applyPose, aimPov, eeMarker, loadParts, OVERLAY, POV_H, POV_VFOV, POV_W, scene, targetMarker } from "../scene3d";
-import { usePrefs, useTelemetry } from "../state";
+import { applyPose, aimPov, eeMarker, GUIDE, loadParts, OVERLAY, POV_H, POV_VFOV, POV_W, scene, setGuideOpacity, targetMarker } from "../scene3d";
+import { setPrefs, usePrefs, useTelemetry } from "../state";
 
 const PRESETS = {
   Iso: { pos: [520, -620, 420], at: [0, -60, 120] },
@@ -52,6 +52,7 @@ export function Viewport({ children }: { children?: ReactNode }) {
     const c = cam.current;
     c.up.set(0, 0, 1);
     c.layers.enable(OVERLAY);
+    c.layers.enable(GUIDE);
     const oc = new OrbitControls(c, r.domElement);
     oc.enableDamping = false;
     controls.current = oc;
@@ -71,6 +72,8 @@ export function Viewport({ children }: { children?: ReactNode }) {
     targetMarker.visible = prefs.showTarget;
   }, [s, prefs.mirrorBoard, prefs.showTarget]);
 
+  useEffect(() => setGuideOpacity(prefs.guideOpacity), [prefs.guideOpacity]);
+
   return (
     <div className="viewport">
       <canvas ref={canvas} aria-label="3D simulation of the arm" />
@@ -80,6 +83,11 @@ export function Viewport({ children }: { children?: ReactNode }) {
           <button key={p} className={`btn sm ${p === view ? "on" : ""}`} onClick={() => aim(p)}>{p}</button>
         ))}
       </div>
+      <label className="guideop">
+        Grip guide
+        <input type="range" min={0} max={1} step={0.05} value={prefs.guideOpacity} aria-label="Grip guide opacity"
+          onChange={(e) => setPrefs({ guideOpacity: +e.target.value })} />
+      </label>
       <div className="note">sim pose = {prefs.mirrorBoard ? "board reported" : "command sent"}</div>
       {failed && <div className="err">Could not load the arm meshes from the backend</div>}
       {children}
@@ -91,7 +99,9 @@ export function Viewport({ children }: { children?: ReactNode }) {
 export function SimPov() {
   const canvas = useRef<HTMLCanvasElement>(null);
   const cam = useRef(new THREE.PerspectiveCamera(POV_VFOV, POV_W / POV_H, 5, 6000));
-  useRenderer(canvas, () => { loadParts().catch(() => {}); }, (r, w, h) => {
+  const prefs = usePrefs();
+  useEffect(() => setGuideOpacity(prefs.guideOpacity), [prefs.guideOpacity]);
+  useRenderer(canvas, () => { cam.current.layers.enable(GUIDE); loadParts().catch(() => {}); }, (r, w, h) => {
     // letterbox to 512x320 so the framing matches the real camera
     const scale = Math.min(w / POV_W, h / POV_H);
     const vw = POV_W * scale, vh = POV_H * scale;
