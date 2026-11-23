@@ -35,6 +35,11 @@ CAM_HFOV_DEG (pinhole model); AZ_SIGN flips the turn direction.
 Only one program can hold the camera: stop camera_capture.py / MaixVision
 runs first.
 
+Mirror (Sequences tab, next to Duplicate) copies the selected sequence
+reflected in the YZ plane: Arm Base and Wrist Yaw swap sides around home,
+"Left" / "Right" swap in the names (Left-Tank-Throw -> Right-Tank-Throw), and
+saved tag offsets change sign.
+
 Requires: paramiko  (pip install paramiko)
 """
 import math
@@ -222,6 +227,63 @@ def saved_offset_deg(t):
     format where offset_deg was [horizontal, vertical]."""
     v = t["offset_deg"]
     return float(v[0] if isinstance(v, (list, tuple)) else v)
+
+
+# ── Mirroring a sequence in the YZ plane (x -> -x) ──
+# Every link offset in arm-sim-end.py has x = 0, the base turns about Z and the
+# wrist yaw about the forearm (Y): reflecting x negates exactly those two sim
+# angles and leaves Arm A, Arm B, pitch and gripper alone. Their limits are
+# symmetric (base ±180, yaw ±90) and the tank keep-out is symmetric in x, so a
+# mirrored pose is as reachable and as safe as the original.
+MIRROR_AXES = ("Arm Base", "Wrist Yaw")
+_SIDE_SWAP = (("Left", "Right"), ("left", "right"), ("LEFT", "RIGHT"), ("Kiri", "Kanan"), ("kiri", "kanan"))
+
+
+def swap_sides(text):
+    """'Left-Tank-Throw' -> 'Right-Tank-Throw' (and back). None if no side word."""
+    import re
+    pairs = {a: b for x, y in _SIDE_SWAP for a, b in ((x, y), (y, x))}
+    pat = re.compile("|".join(re.escape(k) for k in sorted(pairs, key=len, reverse=True)))
+    out = pat.sub(lambda m: pairs[m.group(0)], text)
+    return out if out != text else None
+
+
+def mirror_servo(servo):
+    """Six servo angles -> their YZ mirror image (sim angle -> -sim angle)."""
+    out = list(servo)
+    for name in MIRROR_AXES:
+        k = config.AXES.index(config.AXIS_BY_NAME[name])
+        out[k] = mirror_servo_value(name, out[k])
+    return out
+
+
+def mirror_tag(tag):
+    """A step's tag capture, seen in the mirror: offsets change sign. The tag id
+    is kept; if the other side carries a different tag, re-capture it there."""
+    import copy
+    t = copy.deepcopy(tag)
+    w = (t.get("image") or [0])[0]
+    cam = t.get("camera", {})
+    if "azimuth_deg" in cam:
+        cam["azimuth_deg"] = round(-cam["azimuth_deg"], 2)
+    if "base_servo" in cam:
+        cam["base_servo"] = round(mirror_servo_value("Arm Base", cam["base_servo"]), 2)
+    for g in t.get("tags", []):
+        for key in ("offset_px", "offset_norm"):
+            if key in g:
+                g[key] = -g[key]
+        if "offset_deg" in g:
+            v = g["offset_deg"]
+            g["offset_deg"] = [-v[0]] + list(v[1:]) if isinstance(v, (list, tuple)) else -v
+        if "x_px" in g and w:
+            g["x_px"] = round(w - g["x_px"], 1)
+    t["mirrored"] = True
+    return t
+
+
+def mirror_servo_value(name, v):
+    ax = config.AXIS_BY_NAME[name]
+    return ax.to_servo(-ax.to_sim(v))
 
 
 def describe_tag(tag):
@@ -899,6 +961,19 @@ class CameraViewMixin:
     def _build_sequence_tab(self):
         card = super()._build_sequence_tab()
         lay = card.layout()
+        # "Mirror" goes right after "Duplicate" in the sequence row
+        for k in range(lay.count()):
+            top = lay.itemAt(k).layout()
+            if top is not None and top.indexOf(self.seq_box) >= 0:
+                mir = QPushButton("Mirror")
+                mir.setToolTip("Make a mirrored copy of this sequence (YZ plane: left <-> right). "
+                               "Arm Base and Wrist Yaw swap sides; Left/Right in names swap too")
+                mir.clicked.connect(self._seq_mirror)
+                dup = next((top.itemAt(j).widget() for j in range(top.count())
+                            if isinstance(top.itemAt(j).widget(), QPushButton)
+                            and top.itemAt(j).widget().text() == "Duplicate"), None)
+                top.insertWidget(top.indexOf(dup) + 1 if dup else top.count(), mir)
+                break
         row = QHBoxLayout()
         self.tag_on_save = QCheckBox("Tag on save")
         self.tag_on_save.setChecked(self.camera.prefs.value("camera/tag_on_save", True, type=bool))
@@ -917,6 +992,30 @@ class CameraViewMixin:
         row.addStretch()
         lay.insertLayout(lay.indexOf(self.step_pose) + 1, row)
         return card
+
+    def _seq_mirror(self):
+        """New sequence = the selected one reflected in the YZ plane."""
+        from hil import sequence
+        q = self._seq()
+        if q is None:
+            self._seq_msg("Select a sequence to mirror first.", error=True)
+            return
+        steps = []
+        for s in q.steps:
+            m = s.copy(swap_sides(s.name) or s.name)
+            m.servo = mirror_servo(s.servo)
+            if m.tag:
+                m.tag = mirror_tag(m.tag)
+            steps.append(m)
+        name = sequence.unique_name(swap_sides(q.name) or q.name + " mirrored", self._names())
+        c = sequence.Sequence(name, steps)
+        self.seqs.insert(self.seqs.index(q) + 1, c)
+        self._save_seqs()
+        self._refresh_seq_lists(select=c)
+        tagged = sum(1 for s in steps if s.tag)
+        self._seq_msg(f"Made “{name}”, the mirror of “{q.name}”."
+                      + (f" {tagged} step(s) keep their tag id; re-capture if that side has another tag."
+                         if tagged else ""))
 
     def _show_pose(self):
         super()._show_pose()

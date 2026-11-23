@@ -81,7 +81,7 @@
  *     ESP32 BASE_EN_PIN     -> EN   (active LOW; add 10k pull-up to 3V3 so the
  *                                   motor stays off while the ESP32 boots)
  *     MS1 / MS2             -> tied to VIO or GND on the driver to match
- *                              BASE_MICROSTEPS (both to VIO = 16)
+ *                              BASE_MICROSTEPS (both to VIO = 16, left open = 8)
  *     ESP32 3V3             -> VIO,  ESP32 GND -> GND (logic)
  *     12-24 V supply        -> VM / GND, with a 100 uF capacitor across it at the driver
  *     NEMA17 coils          -> A1/A2 (one coil), B1/B2 (other coil)
@@ -123,9 +123,9 @@ const int BASE_EN_PIN = 33;             // active LOW
 
 // MS1/MS2 are wired on the driver, not by the ESP32; this must match that wiring.
 // TMC2208 standalone: MS2,MS1 = GND,GND 8 | GND,VIO 2 | VIO,GND 4 | VIO,VIO 16.
-const int BASE_MICROSTEPS = 16;
+const int BASE_MICROSTEPS = 8;          // MS1/MS2 left unconnected = both low = 8
 const float BASE_MOTOR_STEPS_PER_REV = 200.0f;   // 1.8 deg NEMA17; 400 for a 0.9 deg one
-const float BASE_GEAR_RATIO = 120.0f / 80.0f;  // motor turns per base turn: 80T on the motor -> 120T on the base
+const float BASE_GEAR_RATIO = 92.0f / 60.0f;  // motor turns per base turn: 60T on the motor -> 92T on the base
 const bool BASE_INVERT_DIR = false;     // flip if the base turns the opposite way to the sim
 const float BASE_POWERUP_ANGLE = 90.0f; // where the base must be at power-up, in servo degrees
 
