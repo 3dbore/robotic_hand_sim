@@ -133,10 +133,14 @@ class Scene:
         self.ee.points[:] = self.ee_pts + np.asarray(ee, np.float32)
         self.render()
 
-    def pov_image(self, w, h, hfov_deg):
+    def pov_image(self, w, h, hfov_deg, vfov_deg=None):
         """What the hand camera sees, as an (h, w, 3) uint8 RGB image: the arm and
         floor only (a real camera can't see the markers or the keep-out box).
-        The offscreen plotter shares the posed meshes, so it is always current."""
+        The offscreen plotter shares the posed meshes, so it is always current.
+        With vfov_deg the height follows the lens instead (w x w*tan(v/2)/tan(h/2));
+        the caller stretches it to the frame."""
+        if vfov_deg is not None:
+            h = max(1, round(w * math.tan(math.radians(vfov_deg) / 2) / math.tan(math.radians(hfov_deg) / 2)))
         if self._pov is None:
             self._pov = pv.Plotter(off_screen=True, window_size=(w, h))
             self._pov.set_background(C["surface_lowest"])
@@ -161,6 +165,38 @@ class Scene:
         else:
             self.target.points[:] = self.target_pts + np.asarray(xyz, np.float32)
             self._set_target_visible(True)
+        self.render()
+
+    def show_tags(self, items, vfov_deg, ray_mm=600.0):
+        """Saved sequence tags as data: for each (sim angles, offset deg, label,
+        color, highlight) the lens at that pose, a centre line along the saved
+        horizontal bearing (+ = right in the image) and a sheet spanning the
+        camera's vertical view around it. Only the bearing is saved, so the tag
+        is somewhere on that sheet; the sheet is cut at the floor."""
+        p = self.plotter
+        for a in getattr(self, "_tag_actors", []):
+            p.remove_actor(a, render=False)
+        self._tag_actors = []
+        b = math.radians(vfov_deg) / 2
+        for angles, deg, text, color, hot in items:
+            pos, focal, up = ase.apply_transform_to_points(self.lens_home, ase.link_transforms(angles)[2])
+            f = (focal - pos) / np.linalg.norm(focal - pos)
+            u = up - pos - np.dot(up - pos, f) * f
+            u /= np.linalg.norm(u)
+            a = math.radians(deg)
+            d = math.cos(a) * f + math.sin(a) * np.cross(f, u)          # cross(f, u) = image right
+            ends = [pos + ray_mm * (math.cos(e) * d + math.sin(e) * u) / math.cos(e) for e in (-b, b)]
+            sheet = pv.PolyData(np.array([pos, *ends]), faces=[3, 0, 1, 2]).clip(
+                normal=(0, 0, 1), origin=(0, 0, 0), invert=False)
+            centre = pos + ray_mm * d
+            self._tag_actors += [
+                p.add_mesh(pv.Line(pos, centre), color=color, line_width=3 if hot else 1.5, render=False),
+                p.add_point_labels([centre], [text], font_size=10, point_size=1, shape_opacity=0.6,
+                                   text_color=color, always_visible=True, render=False),
+            ]
+            if sheet.n_points:
+                self._tag_actors.append(p.add_mesh(sheet, color=color, opacity=0.35 if hot else 0.15,
+                                                   render=False))
         self.render()
 
     def render(self):

@@ -34,17 +34,22 @@ class Step:
     servo: List[float]          # six servo angles, config.AXES order
     hold: float = 0.5           # seconds to wait at this pose
     tag: Optional[dict] = None  # AprilTag capture taken at this pose, if any
+    # Speed profile used to move INTO this step (arm-hil-toolkit-2.py):
+    # {axis name: {"vmax": deg/s, "accel": fraction, "decel": fraction}}. None = default.
+    motion: Optional[dict] = None
 
     def to_json(self):
         d = {"name": self.name, "hold": round(self.hold, 2),
              "servo": {a.name: round(float(v), 2) for a, v in zip(AXES, self.servo)}}
         if self.tag:
             d["tag"] = self.tag
+        if self.motion:
+            d["motion"] = self.motion
         return d
 
     def copy(self, name=None):
         return Step(self.name if name is None else name, list(self.servo), self.hold,
-                    copy.deepcopy(self.tag))
+                    copy.deepcopy(self.tag), copy.deepcopy(self.motion))
 
     @classmethod
     def from_json(cls, d):
@@ -52,7 +57,9 @@ class Step:
         servo = [float(s.get(a.name, a.home)) for a in AXES]
         hold = max(0.0, min(HOLD_MAX_S, float(d.get("hold", 0.5))))
         tag = d.get("tag")
-        return cls(str(d.get("name", "Step")), servo, hold, tag if isinstance(tag, dict) else None)
+        mo = d.get("motion")
+        return cls(str(d.get("name", "Step")), servo, hold, tag if isinstance(tag, dict) else None,
+                   mo if isinstance(mo, dict) else None)
 
 
 @dataclass

@@ -28,10 +28,16 @@ line if there are several). Steps with no tag in view are saved without one.
 "Capture tag" / "Clear tag" edit a step's tag.
 
 Playing a step that has a tag: once the arm arrives, Arm Base alone steers the
-live tag until its centre is back on the saved vertical line (tag left of the
-line -> base turns left, right -> right), then the step's hold starts. If the
+live tag until its centre is back on the saved vertical line (offset minus ->
+Arm Base plus, and the other way round), then the step's hold starts. If the
 tag never shows up it carries on after ALIGN_WAIT_S. The angles come from
 CAM_HFOV_DEG (pinhole model); AZ_SIGN flips the turn direction.
+The base is open loop (stepper, no switch), so a slip stays until something
+measures it: the camera. What the centring finds is kept as a "slip correction"
+and added to Arm Base on every later step (tagged or not, this run and the
+next) until a tagged step measures it again or "Zero slip" clears it. While a
+centred step holds, the tag is still watched and the base re-centres if it
+drifts by ALIGN_RETRIGGER_DEG.
 Only one program can hold the camera: stop camera_capture.py / MaixVision
 runs first.
 
@@ -42,6 +48,8 @@ saved tag offsets change sign.
 
 Requires: paramiko  (pip install paramiko)
 """
+import copy
+import json
 import math
 import os
 import socket
@@ -50,17 +58,18 @@ import sys
 import threading
 import time
 
-from PyQt5.QtCore import QRectF, QSettings, QSize, Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontDatabase, QIcon, QImage, QPainter, QPen
+from PyQt5.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QFontDatabase, QIcon, QImage, QPainter, QPen, QPolygonF
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLineEdit, QPushButton, QSizePolicy, QStackedWidget,
-    QTabBar, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLineEdit, QPushButton, QScrollArea, QSizePolicy,
+    QSlider, QSpinBox, QStackedWidget, QTabBar, QVBoxLayout, QWidget,
 )
 
 import numpy as np
 
 from hil import config, theme
 from hil.app import setup
+from hil.motion import Motion
 from hil.scene import Scene
 from hil.theme import C, MONO
 from hil.widgets import Chip, label, make_card
@@ -137,11 +146,13 @@ CMD_TIMEOUT_S = 6                      # every SSH step gives up after this
 # Horizontal field of view of the MaixCam2 at the capture resolution. A
 # placeholder: measure it (or calibrate) and set it here. Raw pixels are saved
 # too, so captures can be re-derived later with a better value.
-CAM_HFOV_DEG = 60.0
-# +1: turning Arm Base to larger angles pans the camera to the right (a tag
-# right of the target line is followed by turning right). Flip it if the base
-# turns the wrong way round.
-AZ_SIGN = +1.0
+CAM_HFOV_DEG = 83.0
+CAM_VFOV_DEG = 53.0                    # not the aspect-ratio value: the lens is 83 x 53
+# -1: the base moves against the tag's offset (tag left of its line, offset
+# minus -> Arm Base plus). Flip it if the base turns the wrong way round.
+AZ_SIGN = -1.0
+# 3D "Tag rays": one colour per step (index in the sequence), wrapping round.
+TAG_RAY_COLORS = ["#FFD400", "#2EC4B6", "#FF6B6B", "#4D96FF", "#B967FF", "#7BD389"]
 TAG_MAX_AGE_S = 1.0                    # detection must be at most this old
 TAG_SETTLE_S = 0.4                     # ...and taken this long after the arm stopped
 # Centring during playback (Arm Base steers the tag onto its saved line)
@@ -150,6 +161,17 @@ ALIGN_GAIN = 0.8                       # fraction of the error corrected per mov
 ALIGN_MAX_STEP_DEG = 10.0              # biggest single base correction
 ALIGN_MAX_MOVES = 8
 ALIGN_WAIT_S = 4.0                     # give up when no usable frame / tag for this long
+ALIGN_RETRIGGER_DEG = 2.0              # while holding a centred step, re-centre if it drifts this far
+ALIGN_MAX_CORR_DEG = 30.0              # largest slip correction ever added to Arm Base
+
+
+# What each tag id stands for. Edit this table, e.g. {0: "Plastic", 1: "Paper", 2: "Metal"}.
+# Ids not listed are saved as "unknown".
+TAG_TYPES = {}
+
+
+def tag_type(tag_id):
+    return TAG_TYPES.get(int(tag_id), "unknown")
 
 
 def tag_center(corners):
@@ -182,7 +204,7 @@ def annotate_tags(jpeg, detector):
         cx, cy = (int(round(v)) for v in c)
         cv2.circle(bgr, (cx, cy), r + 2, (255, 255, 255), -1, cv2.LINE_AA)
         cv2.circle(bgr, (cx, cy), r, (0, 0, 255), -1, cv2.LINE_AA)
-        cv2.putText(bgr, f"id{d.tag_id}", (cx + r + 4, cy - r - 2), cv2.FONT_HERSHEY_SIMPLEX,
+        cv2.putText(bgr, f"id{d.tag_id} {tag_type(d.tag_id)}", (cx + r + 4, cy - r - 2), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (0, 255, 255), 1, cv2.LINE_AA)
     rgb = np.ascontiguousarray(bgr[:, :, ::-1])
     h, w = rgb.shape[:2]
@@ -194,6 +216,12 @@ def h_angle(u, w):
     positive = right of it (pinhole model, CAM_HFOV_DEG)."""
     f = (w / 2.0) / math.tan(math.radians(CAM_HFOV_DEG) / 2.0)    # focal length, px
     return math.degrees(math.atan2(u - w / 2.0, f))
+
+
+def h_pixel(deg, w):
+    """Inverse of h_angle: image column of a horizontal angle (deg)."""
+    f = (w / 2.0) / math.tan(math.radians(CAM_HFOV_DEG) / 2.0)
+    return w / 2.0 + f * math.tan(math.radians(deg))
 
 
 def tag_record(found, size, servo):
@@ -214,6 +242,7 @@ def tag_record(found, size, servo):
         "camera": {"azimuth_deg": round(base.to_sim(base_servo), 2), "base_servo": round(base_servo, 2)},
         "tags": [{
             "id": int(t["id"]),
+            "type": tag_type(t["id"]),
             "x_px": round(u, 1),
             "offset_px": round(dx, 1),                       # + right of the centre line
             "offset_norm": round(dx / (w / 2.0), 4),
@@ -224,7 +253,10 @@ def tag_record(found, size, servo):
 
 def saved_offset_deg(t):
     """Saved horizontal offset (deg) of a stored tag; also reads the old
-    format where offset_deg was [horizontal, vertical]."""
+    format where offset_deg was [horizontal, vertical]. Re-derived from the
+    pixel offset when there is one, so a CAM_HFOV_DEG change applies to old captures."""
+    if "offset_norm" in t:
+        return math.degrees(math.atan(t["offset_norm"] * math.tan(math.radians(CAM_HFOV_DEG) / 2.0)))
     v = t["offset_deg"]
     return float(v[0] if isinstance(v, (list, tuple)) else v)
 
@@ -287,9 +319,149 @@ def mirror_servo_value(name, v):
 
 
 def describe_tag(tag):
-    parts = [f"id{t['id']} centre {saved_offset_deg(t):+.1f}° off the vertical line "
+    parts = [f"id{t['id']} ({t.get('type') or tag_type(t['id'])}) centre {saved_offset_deg(t):+.1f}° off the vertical line "
              f"({t.get('x_px', t['px'][0] if 'px' in t else 0):.0f} px)" for t in tag.get("tags", [])]
     return "Tag  " + ("   ".join(parts) or "no tags")
+
+
+# ── Per-joint speed profile ──
+# Each axis moves with a trapezoid velocity curve: speed ramps up over the first
+# `accel` share of the move, cruises at `vmax`, ramps down over the last `decel`
+# share. Axes still start and arrive together (the slowest one sets the time).
+# Stored as {axis name: {"vmax": deg/s, "accel": 0..1, "decel": 0..1}}; the same
+# dict is saved in each sequence step (Step.motion) and replayed with it.
+FRAC_MIN, FRAC_MAX, FRAC_DEFAULT = 0.05, 0.95, 0.33
+
+
+def vmax_cap(ax):
+    """Fastest allowed peak speed: what the planner always used (firmware limit x margin)."""
+    return math.floor(ax.speed * config.SPEED_MARGIN * 10) / 10
+
+
+def clean_axis(ax, vmax, accel, decel):
+    vmax = min(max(float(vmax), 1.0), vmax_cap(ax))
+    accel = min(max(float(accel), FRAC_MIN), FRAC_MAX)
+    decel = min(max(float(decel), FRAC_MIN), FRAC_MAX)
+    if accel + decel > 1.0:                # the ramps cannot overlap
+        k = 1.0 / (accel + decel)
+        accel, decel = accel * k, decel * k
+    return {"vmax": round(vmax, 1), "accel": round(accel, 3), "decel": round(decel, 3)}
+
+
+def default_profile():
+    return {a.name: clean_axis(a, vmax_cap(a), FRAC_DEFAULT, FRAC_DEFAULT) for a in config.AXES}
+
+
+def complete_profile(d):
+    """Any stored / partial profile -> a full, clamped one (missing axes get defaults)."""
+    out = default_profile()
+    for a in config.AXES:
+        g = d.get(a.name) if isinstance(d, dict) else None
+        try:
+            out[a.name] = clean_axis(a, g["vmax"], g["accel"], g["decel"])
+        except (TypeError, KeyError, ValueError):
+            pass
+    return out
+
+
+class ProfiledMotion(Motion):
+    """Motion with the per-axis trapezoid profile above instead of one smoothstep."""
+
+    def set_profile(self, prof):
+        p = [complete_profile(prof)[a.name] for a in config.AXES]
+        # a profile change mid-move would make the command jump: wait for the next leg
+        self._pending = (np.array([g["vmax"] for g in p]), np.array([g["accel"] for g in p]),
+                         np.array([g["decel"] for g in p]))
+        if not self.moving:
+            self._apply()
+
+    def _apply(self):
+        self.vmax, self.ta, self.td = self._pending
+        self.vp = 1.0 / (1.0 - (self.ta + self.td) / 2.0)      # peak / mean speed
+        self._pending = None
+
+    def _leg(self, delta):
+        return float(np.max(delta * self.vp / self.vmax))
+
+    def go(self, goal):
+        if getattr(self, "_pending", None) is not None:
+            self._apply()
+        self.queue = []
+        goal = self.clamp(np.asarray(goal, float))
+        delta = np.abs(goal - self.cmd)
+        self.goal = goal
+        self._start = self.cmd.copy()
+        self._t0 = time.monotonic()
+        self._dur = max(self._leg(delta), 0.15) if np.any(delta > 1e-6) else 0.0
+        if self._dur == 0.0:
+            self.cmd = goal.copy()
+
+    def tick(self):
+        if self._dur <= 0.0:
+            return False
+        u = (time.monotonic() - self._t0) / self._dur
+        if u >= 1.0:
+            self.cmd = self.goal.copy()
+            self._dur = 0.0
+            if self.queue:
+                self.go_path(self.queue)
+            return True
+        ta, td, vp = self.ta, self.td, self.vp
+        s = np.where(u < ta, vp * u * u / (2 * ta),
+                     np.where(u > 1 - td, 1 - vp * (1 - u) ** 2 / (2 * td), vp * (ta / 2 + u - ta)))
+        self.cmd = self._start + (self.goal - self._start) * s
+        return True
+
+    def remaining(self):
+        t = 0.0 if self._dur <= 0.0 else max(0.0, self._dur - (time.monotonic() - self._t0))
+        prev = self.goal
+        for g in self.queue:
+            t += max(self._leg(np.abs(g - prev)), 0.15)
+            prev = g
+        return t
+
+
+class ProfilePlot(QWidget):
+    """Speed over time of one joint's move: ramp up, cruise at max, ramp down."""
+
+    REF_DEG = 30.0                         # the move whose duration is printed
+
+    def __init__(self):
+        super().__init__()
+        self.v = (1.0, FRAC_DEFAULT, FRAC_DEFAULT)
+        self.setMinimumSize(200, 78)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def set_values(self, vmax, ta, td):
+        self.v = (vmax, ta, td)
+        self.update()
+
+    def paintEvent(self, _):
+        vmax, ta, td = self.v
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        f = QFont(MONO)
+        f.setPixelSize(10)
+        p.setFont(f)
+        r = QRectF(self.rect()).adjusted(46, 8, -8, -18)
+        p.setPen(QPen(QColor(C["outline_variant"]), 1))
+        p.drawLine(r.bottomLeft(), r.bottomRight())
+        p.drawLine(r.topLeft(), r.bottomLeft())
+        pts = [(0, 0), (ta, 1), (1 - td, 1), (1, 0)]
+        poly = QPolygonF([QPointF(r.left() + x * r.width(), r.bottom() - y * r.height()) for x, y in pts])
+        fill = QColor(C["primary"])
+        fill.setAlpha(55)
+        p.setBrush(fill)
+        p.setPen(QPen(QColor(C["primary"]), 2))
+        p.drawPolygon(poly)
+        p.setPen(QColor(C["outline"]))
+        p.drawText(QRectF(0, r.top() - 6, 44, 12), Qt.AlignRight | Qt.AlignVCenter, f"{vmax:.0f}°/s")
+        p.drawText(QRectF(0, r.bottom() - 6, 44, 12), Qt.AlignRight | Qt.AlignVCenter, "0")
+        dur = self.REF_DEG * (1 / (1 - (ta + td) / 2)) / vmax
+        p.drawText(QRectF(r.left(), r.bottom() + 3, r.width(), 12), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"accel {ta * 100:.0f}%   cruise {(1 - ta - td) * 100:.0f}%   decel {td * 100:.0f}%")
+        p.drawText(QRectF(r.left(), r.bottom() + 3, r.width(), 12), Qt.AlignRight | Qt.AlignVCenter,
+                   f"{self.REF_DEG:.0f}° move = {dur:.1f} s")
 
 
 class CameraClient(QThread):
@@ -511,6 +683,7 @@ class CameraView(QWidget):
         super().__init__()
         self.img = None
         self.info = ""
+        self.target = None             # (offset deg, label): where the step's tag should sit
         self.placeholder = "Type the MaixCam IP and press Connect"
         self.setMinimumSize(120, 75)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -537,10 +710,21 @@ class CameraView(QWidget):
         s = self.img.size().scaled(r.size(), Qt.KeepAspectRatio)
         x, y = (r.width() - s.width()) // 2, (r.height() - s.height()) // 2
         p.drawImage(QRectF(x, y, s.width(), s.height()), self.img)
+        f = QFont(MONO)
+        f.setPixelSize(10)
+        p.setFont(f)
+        if self.target is not None:
+            deg, text = self.target
+            tx = x + h_pixel(deg, s.width())
+            p.setPen(QPen(QColor("#ffd400"), 2, Qt.DashLine))
+            p.drawLine(QPointF(tx, y), QPointF(tx, y + s.height()))
+            tw = p.fontMetrics().horizontalAdvance(text) + 10
+            bx = tx + 4 if tx + 4 + tw <= x + s.width() else tx - 4 - tw   # flip left near the edge
+            box = QRectF(bx, y + 4, tw, 16)
+            p.fillRect(box, QColor(0, 0, 0, 170))
+            p.setPen(QColor("#ffd400"))
+            p.drawText(box, Qt.AlignCenter, text)
         if self.info:
-            f = QFont(MONO)
-            f.setPixelSize(10)
-            p.setFont(f)
             tw = p.fontMetrics().horizontalAdvance(self.info) + 10
             box = QRectF(x + 6, y + s.height() - 22, tw, 16)
             p.fillRect(box, QColor(0, 0, 0, 150))
@@ -568,8 +752,9 @@ class CornerGrip(QWidget):
 class CameraPanel(QFrame):
     """Floating card: header with a Simulated / Real tab + the image. Simulated
     renders the scene from the hand camera's lens; Real is the live MaixCam with
-    its IP / connect row (+ SSH settings). The real stream keeps running (and
-    detecting tags) while the Simulated tab is shown."""
+    its IP / connect row (+ SSH settings). Overlay blends the sim render over
+    the real frame with a slider. The real stream keeps running (and detecting
+    tags) while the other tabs are shown."""
 
     MIN = QSize(230, 150)
     DEFAULT = QSize(360, 330)
@@ -605,6 +790,7 @@ class CameraPanel(QFrame):
         self.tabs.setExpanding(False)
         self.tabs.addTab("Simulated")
         self.tabs.addTab("Real")
+        self.tabs.addTab("Overlay")
         self.tabs.setStyleSheet(
             f"QTabBar::tab {{ padding: 2px 8px; font-weight: 700; color: {C['outline']}; "
             f"background: transparent; border: none; border-bottom: 2px solid transparent; }}"
@@ -681,6 +867,27 @@ class CameraPanel(QFrame):
         self.msg.setWordWrap(True)
         self.msg.setVisible(False)
         body.addWidget(self.msg)
+
+        # Overlay: the simulated render blended over the real frame, to check the sim camera pose.
+        ov = QWidget()
+        self.body.addWidget(ov)
+        ol = QVBoxLayout(ov)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.setSpacing(6)
+        self.ov_view = CameraView()
+        self.ov_view.placeholder = "Connect the camera on the Real tab"
+        ol.addWidget(self.ov_view, 1)
+        orow = QHBoxLayout()
+        orow.setSpacing(6)
+        orow.addWidget(label("Real", "Muted"))
+        self.ov_slider = QSlider(Qt.Horizontal)
+        self.ov_slider.setRange(0, 100)
+        self.ov_slider.setValue(self.prefs.value("camera/overlay", 50, type=int))
+        self.ov_slider.setToolTip("How much of the simulated image is drawn over the real one")
+        self.ov_slider.valueChanged.connect(self._compose_overlay)
+        orow.addWidget(self.ov_slider, 1)
+        orow.addWidget(label("Sim", "Muted"))
+        ol.addLayout(orow)
         lay.addWidget(self.body, 1)
 
         self.grip = CornerGrip(self)
@@ -700,12 +907,32 @@ class CameraPanel(QFrame):
 
     def refresh_sim(self):
         """Re-render the simulated view; only while it is the one on screen."""
-        if self.folded or self.tabs.currentIndex() != 0:
+        if self.folded or self.tabs.currentIndex() == 1:
             return
         w, h = (int(v) for v in self.res_box.currentText().split("x"))
-        rgb = np.ascontiguousarray(self.scene.pov_image(w, h, CAM_HFOV_DEG))
-        img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
-        self.sim_view.set_image(img, f"sim  {w}×{h}  HFOV {CAM_HFOV_DEG:.0f}°")
+        rgb = np.ascontiguousarray(self.scene.pov_image(w, h, CAM_HFOV_DEG, CAM_VFOV_DEG))
+        rh, rw = rgb.shape[:2]
+        img = QImage(rgb.data, rw, rh, 3 * rw, QImage.Format_RGB888).scaled(w, h)  # squeeze to the frame
+        self.sim_view.set_image(img, f"sim  {w}×{h}  FOV {CAM_HFOV_DEG:.0f}°×{CAM_VFOV_DEG:.0f}°")
+        self._compose_overlay()
+
+    def _compose_overlay(self, *_):
+        """Real frame underneath, sim render on top at the slider's opacity."""
+        if self.tabs.currentIndex() != 2:
+            return
+        real, sim = self.view.img, self.sim_view.img
+        if real is None:
+            self.ov_view.clear()
+            return
+        out = real.convertToFormat(QImage.Format_RGB32)
+        pct = self.ov_slider.value()
+        if sim is not None:
+            p = QPainter(out)
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.setOpacity(pct / 100)
+            p.drawImage(QRectF(out.rect()), sim)  # stretched to the real frame; same lens, same aspect
+            p.end()
+        self.ov_view.set_image(out, f"overlay  sim {pct}%")
 
     # ── geometry (the host places the panel; we only report the size) ──
     def resize_to(self, size):
@@ -789,6 +1016,12 @@ class CameraPanel(QFrame):
             return "no frame since the arm stopped yet, try again"
         return snap[1], snap[2]
 
+    def set_target(self, target):
+        for v in (self.view, self.sim_view, self.ov_view):
+            if v.target != target:
+                v.target = target
+                v.update()
+
     def _on_tags_toggled(self, on):
         if self.client is not None:
             self.client.detect_tags = on
@@ -806,6 +1039,7 @@ class CameraPanel(QFrame):
         self.prefs.setValue("camera/folded", self.folded)
         self.prefs.setValue("camera/tags", self.tag_btn.isChecked())
         self.prefs.setValue("camera/tab", self.tabs.currentIndex())
+        self.prefs.setValue("camera/overlay", self.ov_slider.value())
 
     # ── connection ──
     def toggle_connect(self):
@@ -875,6 +1109,7 @@ class CameraPanel(QFrame):
             self.view.clear("Disconnected")
         else:
             self.view.clear("Connection failed (see below). Press Connect to try again.")
+        self._compose_overlay()
 
     def _on_status(self, text, tone):
         self.chip.set(text, tone)
@@ -896,6 +1131,7 @@ class CameraPanel(QFrame):
             self._message("")
         tags = f"  {self.client.tag_count} tag(s)" if self.client and self.client.detect_tags else ""
         self.view.set_image(img, f"{img.width()}×{img.height()}  {self.fps:4.1f} fps{tags}")
+        self._compose_overlay()
 
     def _message(self, text, error=False):
         self.msg.setText(text)
@@ -951,11 +1187,141 @@ class CameraViewMixin:
         self.scene = Scene(self.view_host)
         self.camera = CameraPanel(self.view_host, self.scene)
         self.view_host.set_children(self.scene.widget, self.camera)
+        self.tag_rays_btn = QPushButton("Tag rays")
+        self.tag_rays_btn.setObjectName("Toggle")
+        self.tag_rays_btn.setCheckable(True)
+        self.tag_rays_btn.setToolTip("Show each step's saved tag bearing in the 3D view")
+        self.tag_rays_btn.setChecked(self.camera.prefs.value("camera/scene_tags", True, type=bool))
+        self.tag_rays_btn.toggled.connect(lambda on: self.camera.prefs.setValue("camera/scene_tags", on))
+        lay.itemAt(0).layout().addWidget(self.tag_rays_btn)
         lay.addWidget(self.view_host, 1)
         self.pose_lbl = label("", "Mono")
         self.pose_lbl.setWordWrap(True)
         lay.addWidget(self.pose_lbl)
         return card
+
+    # ── per-joint max speed / accel / decel (Joints tab) ──
+    def _build_joints_tab(self):
+        card = super()._build_joints_tab()
+        self.motion.__class__ = ProfiledMotion          # same state, new move profile
+        self._prefs = QSettings("ELIO", "HILToolkit")
+        try:
+            saved = json.loads(self._prefs.value("motion/profile", "{}", type=str))
+        except ValueError:
+            saved = {}
+        self.profile = complete_profile(saved)          # what the Joints tab is set to
+        self._prof_ui = {}
+        for row in self.rows.values():
+            self._add_speed_ui(row)
+        self._push_profile()
+        return card
+
+    def _add_speed_ui(self, row):
+        ax, lay = row.axis, row.layout()
+        spin = QDoubleSpinBox()
+        spin.setRange(1.0, vmax_cap(ax))
+        spin.setDecimals(1)
+        spin.setSingleStep(5.0)
+        spin.setPrefix("max ")
+        spin.setSuffix("°/s")
+        spin.setKeyboardTracking(False)
+        spin.setToolTip("Top speed of this joint. All joints still arrive together, so the "
+                        "slowest one sets the move time. Saved with each sequence step.")
+        lay.addWidget(spin, 0, 6)
+        btn = QPushButton("Detail")
+        btn.setCheckable(True)
+        btn.setToolTip("Show / edit the acceleration and deceleration of this joint")
+        lay.addWidget(btn, 1, 6)
+
+        panel = QWidget()
+        ph = QHBoxLayout(panel)
+        ph.setContentsMargins(0, 4, 0, 4)
+        plot = ProfilePlot()
+        ph.addWidget(plot, 1)
+        acc, dec = QSpinBox(), QSpinBox()
+        for w, pre, tip in ((acc, "accel ", "Share of the move spent speeding up"),
+                            (dec, "decel ", "Share of the move spent slowing down")):
+            w.setRange(int(FRAC_MIN * 100), int(FRAC_MAX * 100))
+            w.setPrefix(pre)
+            w.setSuffix("%")
+            w.setKeyboardTracking(False)
+            w.setToolTip(tip + " (shorter = snappier, longer = gentler)")
+            ph.addWidget(w)
+        reset = QPushButton("Reset")
+        reset.setToolTip("Back to this joint's default speed and ramps")
+        ph.addWidget(reset)
+        panel.setVisible(False)
+        btn.toggled.connect(panel.setVisible)
+        lay.addWidget(panel, 2, 0, 1, 7)
+
+        n = ax.name
+        spin.valueChanged.connect(lambda v: self._edit_profile(n, vmax=v))
+        acc.valueChanged.connect(lambda v: self._edit_profile(n, accel=v / 100.0))
+        dec.valueChanged.connect(lambda v: self._edit_profile(n, decel=v / 100.0))
+        reset.clicked.connect(lambda: self._edit_profile(n, reset=True))
+        self._prof_ui[n] = (spin, acc, dec, plot)
+        self._sync_profile_ui(n)
+
+    def _edit_profile(self, name, vmax=None, accel=None, decel=None, reset=False):
+        ax = config.AXIS_BY_NAME[name]
+        g = self.profile[name]
+        if reset:
+            g = default_profile()[name]
+        else:
+            vmax = g["vmax"] if vmax is None else vmax
+            if accel is not None:
+                decel = min(g["decel"], 1.0 - accel)       # keep the ramps from overlapping
+            elif decel is not None:
+                accel = min(g["accel"], 1.0 - decel)
+            g = clean_axis(ax, vmax, g["accel"] if accel is None else accel,
+                           g["decel"] if decel is None else decel)
+        self.profile[name] = g
+        self._sync_profile_ui(name)
+        self._push_profile()
+        self._prefs.setValue("motion/profile", json.dumps(self.profile))
+
+    def _sync_profile_ui(self, name):
+        g = self.profile[name]
+        spin, acc, dec, plot = self._prof_ui[name]
+        for w, v in ((spin, g["vmax"]), (acc, round(g["accel"] * 100)), (dec, round(g["decel"] * 100))):
+            w.blockSignals(True)
+            w.setValue(v)
+            w.blockSignals(False)
+        plot.set_values(g["vmax"], g["accel"], g["decel"])
+
+    def _push_profile(self):
+        if self.run is None:                   # a running sequence uses its steps' profiles
+            self.motion.set_profile(self.profile)
+
+    def _stamp_motion(self):
+        """Save the Joints tab's speed profile into the selected step."""
+        q, i = self._sel_step()
+        if q:
+            q.steps[i].motion = copy.deepcopy(self.profile)
+            self._seq_edited(select_step=i)
+
+    base_corr = 0.0                            # slip correction on Arm Base (servo deg), from the camera
+
+    def _run_next(self):
+        r = self.run
+        s = r["seq"].steps[r["idx"] + 1] if r["idx"] + 1 < len(r["seq"].steps) else None
+        if s is not None:                      # old steps without one move at the default profile
+            self.motion.set_profile(s.motion)
+        self._corr_next = True                 # the step's move gets the slip correction
+        try:
+            super()._run_next()
+        finally:
+            self._corr_next = False
+
+    def _request(self, servo_goal):
+        if getattr(self, "_corr_next", False) and self.base_corr:
+            servo_goal = list(servo_goal)
+            servo_goal[AXES_IDX["Arm Base"]] += self.base_corr
+        return super()._request(servo_goal)
+
+    def _end_run(self, msg, error=False):
+        super()._end_run(msg, error)
+        self._push_profile()
 
     # ── AprilTag capture in sequence steps ──
     def _build_sequence_tab(self):
@@ -989,6 +1355,11 @@ class CameraViewMixin:
         clr.setToolTip("Remove the selected step's tag")
         clr.clicked.connect(self._step_clear_tag)
         row.addWidget(clr)
+        zero = QPushButton("Zero slip")
+        zero.setToolTip("Forget the Arm Base slip correction the camera measured "
+                        "(after re-homing the base by hand or power-cycling the board)")
+        zero.clicked.connect(self._zero_slip)
+        row.addWidget(zero)
         row.addStretch()
         lay.insertLayout(lay.indexOf(self.step_pose) + 1, row)
         return card
@@ -1026,13 +1397,62 @@ class CameraViewMixin:
         super()._tick()
         if self.motion.moving or moving_before:
             self._still_since = time.monotonic()
+        self.camera.set_target(self._tag_target())
+        self._sync_scene_tags()
+
+    def _sync_scene_tags(self):
+        """Draw the shown sequence's saved tags in the 3D view, as saved: from each
+        step's own pose, no slip correction, one colour per step. Rebuilt only
+        when they change; the "Tag rays" toggle hides them."""
+        r = self.run
+        q, sel = (r["seq"], r["idx"]) if r else (self._seq(), self.timeline.sel)
+        on = self.tag_rays_btn.isChecked()
+        steps = [(k, s) for k, s in enumerate(q.steps) if s.tag and s.tag.get("tags")] if q and on else []
+        key = (id(q), sel, [(tuple(s.servo), repr(s.tag)) for _, s in steps])
+        if key == getattr(self, "_scene_tags_key", None):
+            return
+        self._scene_tags_key = key
+        items = []
+        for k, s in steps:
+            t = s.tag["tags"][0]
+            deg = saved_offset_deg(t)
+            items.append((self.motion.to_sim(np.asarray(s.servo, float)), deg,
+                          f"{k + 1}. id{t['id']} {s.name} ({deg:+.1f}°)",
+                          TAG_RAY_COLORS[k % len(TAG_RAY_COLORS)], k == sel))
+        self.scene.show_tags(items, CAM_VFOV_DEG)
+
+    def _tag_target(self):
+        """(offset deg, label) of the tag the running step (else the selected step)
+        expects, for the camera overlay; None if that step has no tag."""
+        r = self.run
+        if r is not None:
+            q, i = r["seq"], r["idx"]
+            s = q.steps[i] if 0 <= i < len(q.steps) else None
+        else:
+            q, i = self._sel_step()
+            s = q.steps[i] if q else None
+        if not (s and s.tag and s.tag.get("tags")):
+            return None
+        t = s.tag["tags"][0]
+        err = self._tag_error(t)
+        live = f"  off {AZ_SIGN * err:+.1f}°" if not isinstance(err, str) else ""   # raw: + = right of the line
+        return saved_offset_deg(t), f"id{t['id']} target{live}  base corr {self.base_corr:+.1f}°"
+
+    def _step_go(self, i):
+        self._corr_next = True                 # going to a step by hand keeps the slip correction too
+        try:
+            super()._step_go(i)
+        finally:
+            self._corr_next = False
 
     def _capture(self, step):
         """Fill step.tag from the camera. Returns (ok, note for the status line)."""
         if self.motion.moving:
             return False, "the arm is still moving"
         servo = [float(v) for v in self.motion.cmd]
-        if max(abs(servo[k] - step.servo[k]) for k in (AXES_IDX["Arm Base"], AXES_IDX["Arm A"])) > 0.5:
+        want = list(step.servo)
+        want[AXES_IDX["Arm Base"]] += self.base_corr
+        if max(abs(servo[k] - want[k]) for k in (AXES_IDX["Arm Base"], AXES_IDX["Arm A"])) > 0.5:
             return False, "the arm is not at this step (double-click it to go there first)"
         snap = self.camera.tag_snapshot(getattr(self, "_still_since", 0.0) + TAG_SETTLE_S)
         if isinstance(snap, str):
@@ -1044,13 +1464,34 @@ class CameraViewMixin:
         return True, describe_tag(step.tag)
 
     def _run_tick(self):
-        """Before a step's hold starts, centre its saved tag with Arm Base."""
+        """Before a step's hold starts, centre its saved tag with Arm Base; while
+        it holds, keep watching the tag and re-centre if the base slips."""
         r = self.run
         q = r["seq"]
         s = q.steps[r["idx"]] if r["idx"] < len(q.steps) else None
-        if s is not None and s.tag and s.tag.get("tags") and not self._align_done(r, s):
-            return
+        if s is not None and s.tag and s.tag.get("tags"):
+            if not self._align_done(r, s) or self._slipped(r, s):
+                return
         super()._run_tick()
+
+    def _tag_error(self, saved):
+        """Live horizontal error (deg) of the saved tag, + = too far right; or why there is none."""
+        snap = self.camera.tag_snapshot(getattr(self, "_still_since", 0.0) + TAG_SETTLE_S)
+        if isinstance(snap, str):
+            return snap
+        (w, _h), found = snap
+        match = next((t for t in found if t["id"] == saved["id"]), None)
+        if match is None:
+            return f"tag {saved['id']} not in view"
+        return AZ_SIGN * (h_angle(match["center"][0], w) - saved_offset_deg(saved))
+
+    def _request_step(self, s):
+        goal = list(s.servo)
+        goal[AXES_IDX["Arm Base"]] += self.base_corr
+        why = self._request(goal)
+        if not why:
+            self._goal_changed()
+        return why
 
     def _align_done(self, r, s):
         """One tick of the centring loop. True when finished (or given up)."""
@@ -1060,42 +1501,81 @@ class CameraViewMixin:
         if st.get("done"):
             return True
         saved = s.tag["tags"][0]
-        snap = self.camera.tag_snapshot(getattr(self, "_still_since", 0.0) + TAG_SETTLE_S)
-        if isinstance(snap, str):
-            if "not connected" in snap or "detection is off" in snap or time.monotonic() > st["deadline"]:
-                return self._align_end(r, s, st, f"not centred: {snap}")
+        err = self._tag_error(saved)
+        if isinstance(err, str):
+            if "not connected" in err or "detection is off" in err or time.monotonic() > st["deadline"]:
+                return self._align_end(r, s, st, f"not centred: {err}", error=True)
             return False
-        (w, _h), found = snap
-        match = next((t for t in found if t["id"] == saved["id"]), None)
-        if match is None:
-            if time.monotonic() > st["deadline"]:
-                return self._align_end(r, s, st, f"not centred: tag {saved['id']} not in view")
-            return False
-        err = AZ_SIGN * (h_angle(match["center"][0], w) - saved_offset_deg(saved))   # + = tag too far right
         if abs(err) <= ALIGN_TOL_DEG:
-            return self._align_end(r, s, st, f"tag {saved['id']} centred ({err:+.1f}°)")
+            st["centred"] = True
+            return self._align_end(r, s, st, f"tag {saved['id']} centred ({err:+.1f}°), "
+                                             f"base slip correction {self.base_corr:+.1f}°")
+        if st["moves"] and abs(err) > abs(st["last_err"]) + ALIGN_TOL_DEG:
+            # the last correction pushed the tag further off: undo it rather than run away
+            self.base_corr -= st["last_step"]
+            self._request_step(s)
+            return self._align_end(r, s, st, f"not centred: turning the base moved tag {saved['id']} "
+                                             f"further off ({st['last_err']:+.1f}° -> {err:+.1f}°). "
+                                             "Check AZ_SIGN / CAM_HFOV_DEG.", error=True)
         if st["moves"] >= ALIGN_MAX_MOVES:
-            return self._align_end(r, s, st, f"gave up centring, {err:+.1f}° off")
+            return self._align_end(r, s, st, f"gave up centring, {err:+.1f}° off", error=True)
         step = max(-ALIGN_MAX_STEP_DEG, min(ALIGN_MAX_STEP_DEG, ALIGN_GAIN * err))
-        goal = self.motion.final_goal.copy()
-        goal[AXES_IDX["Arm Base"]] += step                  # tag right -> turn right, left -> left
-        why = self._request(goal)
+        new = max(-ALIGN_MAX_CORR_DEG, min(ALIGN_MAX_CORR_DEG, self.base_corr + step))
+        if abs(new - self.base_corr) < 0.05:
+            return self._align_end(r, s, st, f"not centred: slip correction already at its "
+                                             f"±{ALIGN_MAX_CORR_DEG:.0f}° limit, {err:+.1f}° off", error=True)
+        old, self.base_corr = self.base_corr, new             # offset minus -> base plus (AZ_SIGN)
+        before = float(self.motion.final_goal[AXES_IDX["Arm Base"]])
+        why = self._request_step(s)
         if why:
-            return self._align_end(r, s, st, f"not centred: {why}")
-        st["moves"] += 1
-        st["deadline"] = time.monotonic() + ALIGN_WAIT_S
-        self._goal_changed()
+            self.base_corr = old
+            return self._align_end(r, s, st, f"not centred: {why}", error=True)
+        if abs(float(self.motion.final_goal[AXES_IDX["Arm Base"]]) - before) < 0.05:
+            self.base_corr = old               # clamped: the slip is real, this step just can't fix it
+            return self._align_end(r, s, st, f"not centred: Arm Base is at its limit ({before:.0f}°), "
+                                             f"tag {saved['id']} {err:+.1f}° off", error=True)
+        st.update(moves=st["moves"] + 1, last_err=err, last_step=new - old,
+                  deadline=time.monotonic() + ALIGN_WAIT_S)
         self._run_msg(f"Step {r['idx'] + 1} “{s.name}”: centring tag {saved['id']}, "
-                      f"{err:+.1f}° {'right' if err > 0 else 'left'} of its line")
+                      f"{AZ_SIGN * err:+.1f}° {'right' if AZ_SIGN * err > 0 else 'left'} of its line, "
+                      f"base {step:+.1f}°")
         return False
 
-    def _align_end(self, r, s, st, note):
-        st["done"] = True
-        self._run_msg(f"Step {r['idx'] + 1} “{s.name}”: {note}")
+    def _slipped(self, r, s):
+        """While a centred step holds: True (and re-arm the centring) if the tag drifted off."""
+        st = r["align"]
+        if not st.get("centred"):
+            return False
+        err = self._tag_error(s.tag["tags"][0])
+        if isinstance(err, str) or abs(err) <= ALIGN_RETRIGGER_DEG:
+            return False                       # tag hidden for a moment: keep holding
+        r["align"] = {"idx": r["idx"], "moves": 0, "deadline": time.monotonic() + ALIGN_WAIT_S}
+        self._log(f"Step {r['idx'] + 1} “{s.name}”: base slipped, tag {err:+.1f}° off, re-centring",
+                  C["warning"])
         return True
+
+    def _align_end(self, r, s, st, note, error=False):
+        st["done"] = True
+        msg = f"Step {r['idx'] + 1} “{s.name}”: {note}"
+        self._run_msg(msg)
+        self._log(msg, C["warning"] if error else None)
+        return True
+
+    def _zero_slip(self):
+        self.base_corr = 0.0
+        self._seq_msg("Arm Base slip correction cleared.")
+
+    def _uncorrect_saved(self):
+        """The commanded pose includes the slip correction; a saved step must not,
+        or playback adds it a second time."""
+        q, i = self._sel_step()
+        if q and self.base_corr:
+            q.steps[i].servo[AXES_IDX["Arm Base"]] -= self.base_corr
 
     def _step_add(self):
         super()._step_add()
+        self._uncorrect_saved()
+        self._stamp_motion()
         if self.tag_on_save.isChecked():
             self._tag_after_save("Added")
 
@@ -1103,6 +1583,8 @@ class CameraViewMixin:
         q, i = self._sel_step()
         had = bool(q and q.steps[i].tag)
         super()._step_update()
+        self._uncorrect_saved()
+        self._stamp_motion()
         if q and self.tag_on_save.isChecked():
             q.steps[i].tag = None              # the old tag belongs to the old pose
             self._tag_after_save("Updated", dropped=had)
@@ -1115,7 +1597,7 @@ class CameraViewMixin:
         ok, note = self._capture(s)
         self._seq_edited()
         if ok:
-            ids = ", ".join(str(t["id"]) for t in s.tag["tags"])
+            ids = ", ".join(f"{t['id']} ({t.get('type', 'unknown')})" for t in s.tag["tags"])
             self._seq_msg(f"{verb} “{s.name}” with tag {ids}.")
         else:
             self._seq_msg(f"{verb} “{s.name}” without a tag: {note}."
@@ -1146,6 +1628,8 @@ class CameraViewMixin:
         q, i = self._sel_step()
         if q and q.steps[i].tag:
             self.step_pose.setText(self.step_pose.text() + "\n" + describe_tag(q.steps[i].tag))
+        if q and q.steps[i].motion:
+            self.step_pose.setText(self.step_pose.text() + "\nSpeed profile saved with this step")
 
     def closeEvent(self, e):
         self.camera.save_prefs()
@@ -1164,6 +1648,12 @@ def build_window():
 
     w = CameraMainWindow()
     w.setWindowTitle("ELIOS HIL Toolkit · Camera")
+    # Scroll the whole page when the window is smaller than its content.
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    scroll.setWidget(w.takeCentralWidget())
+    w.setCentralWidget(scroll)
     return w
 
 
