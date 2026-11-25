@@ -1,0 +1,987 @@
+{
+  "sequences": [
+    {
+      "name": "Left-Tank-New",
+      "steps": [
+        {
+          "name": "Pose 1",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 75.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 138.1,
+            "Arm B": 131.22,
+            "Arm A": 76.37,
+            "Arm Base": 167.01
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 2",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 75.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 179.75,
+            "Arm B": 75.93,
+            "Arm A": 76.4,
+            "Arm Base": 243.0
+          },
+          "tag": {
+            "time": "2026-11-24T00:33:52",
+            "image": [
+              640,
+              480
+            ],
+            "hfov_deg": 83.0,
+            "camera": {
+              "azimuth_deg": 153.0,
+              "base_servo": 243.0
+            },
+            "tags": [
+              {
+                "id": 4,
+                "type": "unknown",
+                "x_px": 292.5,
+                "offset_px": -27.5,
+                "offset_norm": -0.0859,
+                "offset_deg": -4.35
+              }
+            ]
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 3",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 179.75,
+            "Arm B": 75.93,
+            "Arm A": 76.4,
+            "Arm Base": 243.0
+          },
+          "tag": {
+            "time": "2026-11-24T00:34:14",
+            "image": [
+              640,
+              480
+            ],
+            "hfov_deg": 83.0,
+            "camera": {
+              "azimuth_deg": 153.0,
+              "base_servo": 243.0
+            },
+            "tags": [
+              {
+                "id": 4,
+                "type": "unknown",
+                "x_px": 291.6,
+                "offset_px": -28.4,
+                "offset_norm": -0.0889,
+                "offset_deg": -4.5
+              }
+            ]
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 4",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 180.0,
+            "Arm B": 86.66,
+            "Arm A": 77.91,
+            "Arm Base": 103.6
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 5",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 0.0,
+            "Arm B": 180.0,
+            "Arm A": 90.0,
+            "Arm Base": 90.0
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Mid-Tank",
+      "steps": [
+        {
+          "name": "Pose 1",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 75.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 138.1,
+            "Arm B": 131.22,
+            "Arm A": 76.37,
+            "Arm Base": 167.01
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 2",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 75.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 179.75,
+            "Arm B": 75.93,
+            "Arm A": 76.4,
+            "Arm Base": 249.0
+          },
+          "tag": {
+            "time": "2026-11-23T22:08:18",
+            "image": [
+              640,
+              480
+            ],
+            "hfov_deg": 60.0,
+            "camera": {
+              "azimuth_deg": 159.0,
+              "base_servo": 249.0
+            },
+            "tags": [
+              {
+                "id": 4,
+                "type": "unknown",
+                "x_px": 335.8,
+                "offset_px": 15.8,
+                "offset_norm": 0.0494,
+                "offset_deg": 1.63
+              }
+            ]
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 3",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 75.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 179.75,
+            "Arm B": 75.93,
+            "Arm A": 76.4,
+            "Arm Base": 270.0
+          },
+          "tag": {
+            "time": "2026-11-23T22:09:10",
+            "image": [
+              640,
+              480
+            ],
+            "hfov_deg": 60.0,
+            "camera": {
+              "azimuth_deg": 180.0,
+              "base_servo": 270.0
+            },
+            "tags": [
+              {
+                "id": 2,
+                "type": "unknown",
+                "x_px": 210.9,
+                "offset_px": -109.1,
+                "offset_norm": -0.3408,
+                "offset_deg": -11.13
+              }
+            ]
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 4",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 179.75,
+            "Arm B": 75.93,
+            "Arm A": 76.4,
+            "Arm Base": 270.0
+          },
+          "tag": {
+            "time": "2026-11-23T22:09:24",
+            "image": [
+              640,
+              480
+            ],
+            "hfov_deg": 60.0,
+            "camera": {
+              "azimuth_deg": 180.0,
+              "base_servo": 270.0
+            },
+            "tags": [
+              {
+                "id": 2,
+                "type": "unknown",
+                "x_px": 210.7,
+                "offset_px": -109.3,
+                "offset_norm": -0.3414,
+                "offset_deg": -11.15
+              }
+            ]
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 5",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 179.75,
+            "Arm B": 75.93,
+            "Arm A": 76.4,
+            "Arm Base": 228.0
+          },
+          "tag": {
+            "time": "2026-11-23T22:10:50",
+            "image": [
+              640,
+              480
+            ],
+            "hfov_deg": 60.0,
+            "camera": {
+              "azimuth_deg": 138.0,
+              "base_servo": 228.0
+            },
+            "tags": [
+              {
+                "id": 4,
+                "type": "unknown",
+                "x_px": 158.6,
+                "offset_px": -161.4,
+                "offset_norm": -0.5042,
+                "offset_deg": -16.23
+              }
+            ]
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 6",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 179.75,
+            "Arm B": 75.93,
+            "Arm A": 76.4,
+            "Arm Base": 182.0
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 7",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 135.69,
+            "Arm B": 135.07,
+            "Arm A": 61.33,
+            "Arm Base": 182.0
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 8",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 0.0,
+            "Arm B": 180.0,
+            "Arm A": 90.0,
+            "Arm Base": 90.0
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Right-Tank-New",
+      "steps": [
+        {
+          "name": "Pose 1",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 75.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 138.1,
+            "Arm B": 131.22,
+            "Arm A": 76.37,
+            "Arm Base": 12.99
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 2",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 75.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 180.0,
+            "Arm B": 86.66,
+            "Arm A": 75.91,
+            "Arm Base": -82.0
+          },
+          "tag": {
+            "time": "2026-11-23T22:47:17",
+            "image": [
+              640,
+              480
+            ],
+            "hfov_deg": 60.0,
+            "camera": {
+              "azimuth_deg": -172.0,
+              "base_servo": -82.0
+            },
+            "tags": [
+              {
+                "id": 3,
+                "type": "unknown",
+                "x_px": 169.5,
+                "offset_px": -150.5,
+                "offset_norm": -0.4702,
+                "offset_deg": -15.19
+              }
+            ]
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 3",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 180.0,
+            "Arm B": 86.66,
+            "Arm A": 75.91,
+            "Arm Base": -82.0
+          },
+          "tag": {
+            "time": "2026-11-23T22:47:48",
+            "image": [
+              640,
+              480
+            ],
+            "hfov_deg": 60.0,
+            "camera": {
+              "azimuth_deg": -172.0,
+              "base_servo": -82.0
+            },
+            "tags": [
+              {
+                "id": 3,
+                "type": "unknown",
+                "x_px": 169.4,
+                "offset_px": -150.6,
+                "offset_norm": -0.4706,
+                "offset_deg": -15.2
+              }
+            ]
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 4",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 180.0,
+            "Arm B": 86.66,
+            "Arm A": 77.91,
+            "Arm Base": 76.4
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        },
+        {
+          "name": "Pose 5",
+          "hold": 0.5,
+          "servo": {
+            "Gripper": 180.0,
+            "Wrist Yaw": 90.0,
+            "Wrist Pitch": 0.0,
+            "Arm B": 180.0,
+            "Arm A": 90.0,
+            "Arm Base": 75.31
+          },
+          "motion": {
+            "Gripper": {
+              "vmax": 72.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Yaw": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Wrist Pitch": {
+              "vmax": 36.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm B": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm A": {
+              "vmax": 24.0,
+              "accel": 0.33,
+              "decel": 0.33
+            },
+            "Arm Base": {
+              "vmax": 32.0,
+              "accel": 0.72,
+              "decel": 0.18
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

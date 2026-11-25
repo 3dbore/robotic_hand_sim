@@ -1,0 +1,10 @@
+{
+  "signs": {
+    "Gripper": -1,
+    "Wrist Yaw": 1,
+    "Wrist Pitch": 1,
+    "Arm B": -1,
+    "Arm A": 1,
+    "Arm Base": 1
+  }
+}
